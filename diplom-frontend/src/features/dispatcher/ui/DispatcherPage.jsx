@@ -1,20 +1,22 @@
-// React hooks for component state, side effects and memoization.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AIRPORTS_RF } from '../model/constants'
 import {
+  AIRPORTS_RF,
+  REGIONS_RF,
+} from '../model/constants'
+import {
+  buildCurvedRoute,
   clampScore,
   evaluateCruiseRisk,
   evaluateSurfaceRisk,
   getFeasibility,
   getPrecipPerHour,
-  riskLevelLabel,
   safeNumber,
 } from '../model/risk'
+import { loadFlights, saveFlights } from '../model/storage'
 import { loadLeafletAssets } from '../services/leafletLoader'
 import { fetchWeatherByAirport, isWeatherCacheFresh } from '../services/weatherApi'
 import './DispatcherPage.css'
 
-// Visual legend for risk levels displayed on top of the map.
 const RISK_LEGEND = [
   { label: 'Низкий', className: 'dot-low' },
   { label: 'Умеренный', className: 'dot-medium' },
@@ -22,7 +24,6 @@ const RISK_LEGEND = [
   { label: 'Критический', className: 'dot-critical' },
 ]
 
-// Form default values.
 function createInitialForm() {
   return {
     fromCity: '',
@@ -34,86 +35,47 @@ function createInitialForm() {
   }
 }
 
-// Convert numeric score to CSS class.
-function getRiskClass(score) {
-  if (score <= 30) return 'risk-low'
-  if (score <= 55) return 'risk-medium'
-  if (score <= 75) return 'risk-high'
-  return 'risk-critical'
+function formatTime(value) {
+  return value ? new Date(value).toLocaleString() : 'n/a'
 }
 
-// Format helpers for weather fields in UI.
-function formatFixedOrNA(value, digits = 1) {
-  const numeric = safeNumber(value)
-  return numeric == null ? 'нет данных' : numeric.toFixed(digits)
-}
-
-function formatIntOrNA(value) {
-  const numeric = safeNumber(value)
-  return numeric == null ? 'нет данных' : String(Math.round(numeric))
-}
-
-function formatVisibilityKmOrNA(value) {
-  const numeric = safeNumber(value)
-  return numeric == null ? 'нет данных' : (numeric / 1000).toFixed(1)
-}
-
-// Validate route before risk calculation.
-function validateRoute(formState) {
-  if (formState.fromCity && formState.toCity && formState.fromCity === formState.toCity) {
-    return 'Город вылета и город прилета не должны совпадать'
-  }
-
-  if (
-    formState.fromAirportId &&
-    formState.toAirportId &&
-    formState.fromAirportId === formState.toAirportId
-  ) {
-    return 'Аэропорт вылета и аэропорт прилета не должны совпадать'
-  }
-
-  return ''
+function getRegionAirports(regionId) {
+  return AIRPORTS_RF.filter((airport) => airport.region === regionId)
 }
 
 export default function DispatcherPage() {
-  // Leaflet map and layers refs.
   const mapContainerRef = useRef(null)
   const mapRef = useRef(null)
+  const regionLayerRef = useRef(null)
   const airportLayerRef = useRef(null)
   const routeLayerRef = useRef(null)
-
-  // Weather cache ref mirrors state to avoid stale closures in async calls.
   const weatherCacheRef = useRef({})
 
-  // Map loading state.
   const [leafletReady, setLeafletReady] = useState(false)
   const [leafletError, setLeafletError] = useState('')
 
-  // Form and current calculated flight.
+  const [selectedRegionId, setSelectedRegionId] = useState('central')
+  const [hoveredRegionId, setHoveredRegionId] = useState(null)
+
   const [form, setForm] = useState(createInitialForm)
-  const [activeFlight, setActiveFlight] = useState(null)
-
-  // Selected weather point and weather storage.
+  const [flights, setFlights] = useState(loadFlights)
+  const [selectedFlightId, setSelectedFlightId] = useState(null)
   const [selectedWeatherAirportId, setSelectedWeatherAirportId] = useState('')
-  const [weatherByAirport, setWeatherByAirport] = useState({})
 
-  // UI process flags.
+  const [weatherByAirport, setWeatherByAirport] = useState({})
   const [isEvaluating, setIsEvaluating] = useState(false)
   const [error, setError] = useState('')
 
-  // Fast airport lookup by id.
   const airportsById = useMemo(
     () => Object.fromEntries(AIRPORTS_RF.map((airport) => [airport.id, airport])),
     [],
   )
 
-  // Unique sorted city list for selects.
   const cities = useMemo(
     () => [...new Set(AIRPORTS_RF.map((airport) => airport.city))].sort((a, b) => a.localeCompare(b)),
     [],
   )
 
-  // Filter airport options by selected city.
   const fromAirportOptions = useMemo(() => {
     if (!form.fromCity) return []
     return AIRPORTS_RF.filter((airport) => airport.city === form.fromCity)
@@ -124,11 +86,14 @@ export default function DispatcherPage() {
     return AIRPORTS_RF.filter((airport) => airport.city === form.toCity)
   }, [form.toCity])
 
-  // Airports selected in form.
   const selectedFrom = form.fromAirportId ? airportsById[form.fromAirportId] : null
   const selectedTo = form.toAirportId ? airportsById[form.toAirportId] : null
 
-  // Active route source: calculated flight first, form fallback second.
+  const activeFlight = useMemo(
+    () => flights.find((flight) => flight.id === selectedFlightId) ?? null,
+    [flights, selectedFlightId],
+  )
+
   const activeRoute = useMemo(() => {
     if (activeFlight) {
       return {
@@ -141,28 +106,32 @@ export default function DispatcherPage() {
     return { from: selectedFrom, to: selectedTo }
   }, [activeFlight, airportsById, selectedFrom, selectedTo])
 
-  // Weather selected by clicking a map marker.
-  const selectedWeatherAirport = selectedWeatherAirportId ? airportsById[selectedWeatherAirportId] : null
-  const selectedWeather = selectedWeatherAirportId ? weatherByAirport[selectedWeatherAirportId]?.data : null
+  const hoveredRegion = useMemo(
+    () => REGIONS_RF.find((region) => region.id === hoveredRegionId) ?? null,
+    [hoveredRegionId],
+  )
 
-  // Prepared risk view model for the right-bottom card.
-  const activeRisk = useMemo(() => {
-    if (!activeFlight) return null
-    return {
-      total: activeFlight.totalRisk,
-      departure: activeFlight.departureRisk,
-      arrival: activeFlight.arrivalRisk,
-      cruise: activeFlight.cruiseRisk,
-      feasibility: activeFlight.feasibility,
-    }
-  }, [activeFlight])
+  const hoveredRegionAirports = useMemo(
+    () => (hoveredRegion ? getRegionAirports(hoveredRegion.id) : []),
+    [hoveredRegion],
+  )
 
-  // Keep ref in sync with state cache.
+  const selectedWeatherAirport = selectedWeatherAirportId
+    ? airportsById[selectedWeatherAirportId]
+    : null
+
+  const selectedWeather = selectedWeatherAirportId
+    ? weatherByAirport[selectedWeatherAirportId]?.data
+    : null
+
+  useEffect(() => {
+    saveFlights(flights)
+  }, [flights])
+
   useEffect(() => {
     weatherCacheRef.current = weatherByAirport
   }, [weatherByAirport])
 
-  // Load Leaflet scripts/styles once.
   useEffect(() => {
     let cancelled = false
 
@@ -181,7 +150,6 @@ export default function DispatcherPage() {
     }
   }, [])
 
-  // Create map instance after Leaflet is ready.
   useEffect(() => {
     if (!leafletReady || !mapContainerRef.current || mapRef.current) return
 
@@ -200,9 +168,10 @@ export default function DispatcherPage() {
     }).addTo(map)
     L.control.zoom({ position: 'topright' }).addTo(map)
 
-    // Ensure proper first paint when container appears.
+    // Ensure map renders when container is visible.
     setTimeout(() => map.invalidateSize(), 0)
 
+    regionLayerRef.current = L.layerGroup().addTo(map)
     airportLayerRef.current = L.layerGroup().addTo(map)
     routeLayerRef.current = L.layerGroup().addTo(map)
     mapRef.current = map
@@ -213,7 +182,43 @@ export default function DispatcherPage() {
     }
   }, [leafletReady])
 
-  // Load weather with stale-safe cache.
+  useEffect(() => {
+    if (!mapRef.current || !regionLayerRef.current) return
+
+    const L = window.L
+    const layer = regionLayerRef.current
+    layer.clearLayers()
+
+    REGIONS_RF.forEach((region) => {
+      const regionAirports = getRegionAirports(region.id)
+      const airportLabels = regionAirports.map((airport) => airport.id).join(', ')
+      const isActive = region.id === selectedRegionId
+
+      const rectangle = L.rectangle(region.bounds, {
+        color: isActive ? '#54b0ff' : '#6b849b',
+        weight: isActive ? 2 : 1,
+        fillColor: isActive ? '#2a5373' : '#2f4250',
+        fillOpacity: isActive ? 0.22 : 0.1,
+        dashArray: '4 6',
+      })
+
+      rectangle.bindTooltip(`${region.name}: ${airportLabels}`, {
+        sticky: true,
+        direction: 'center',
+        opacity: 0.92,
+      })
+
+      rectangle.on('mouseover', () => setHoveredRegionId(region.id))
+      rectangle.on('mouseout', () => setHoveredRegionId(null))
+      rectangle.on('click', () => {
+        setSelectedRegionId(region.id)
+        mapRef.current.fitBounds(region.bounds, { padding: [20, 20] })
+      })
+
+      rectangle.addTo(layer)
+    })
+  }, [selectedRegionId])
+
   const ensureWeather = useCallback(
     async (airportId) => {
       const cached = weatherCacheRef.current[airportId]
@@ -234,7 +239,6 @@ export default function DispatcherPage() {
     [airportsById],
   )
 
-  // Open weather card for airport clicked on map.
   const openAirportWeather = useCallback(
     async (airportId) => {
       setSelectedWeatherAirportId(airportId)
@@ -247,7 +251,44 @@ export default function DispatcherPage() {
     [ensureWeather],
   )
 
-  // Draw only active-route airport points.
+  const selectAirportForRoute = useCallback(
+    (airportId) => {
+      const airport = airportsById[airportId]
+      if (!airport) return
+
+      setError('')
+      setSelectedFlightId(null)
+      setSelectedRegionId(airport.region)
+
+      setForm((prev) => {
+        if (!prev.fromAirportId || (prev.fromAirportId && prev.toAirportId)) {
+          return {
+            ...prev,
+            fromCity: airport.city,
+            fromAirportId: airport.id,
+            toCity: prev.fromAirportId && prev.toAirportId ? '' : prev.toCity,
+            toAirportId: prev.fromAirportId && prev.toAirportId ? '' : prev.toAirportId,
+          }
+        }
+
+        if (prev.fromAirportId === airport.id) {
+          return {
+            ...prev,
+            toCity: '',
+            toAirportId: '',
+          }
+        }
+
+        return {
+          ...prev,
+          toCity: airport.city,
+          toAirportId: airport.id,
+        }
+      })
+    },
+    [airportsById],
+  )
+
   useEffect(() => {
     if (!mapRef.current || !airportLayerRef.current) return
 
@@ -255,30 +296,46 @@ export default function DispatcherPage() {
     const layer = airportLayerRef.current
     layer.clearLayers()
 
-    if (!activeRoute?.from || !activeRoute?.to) return
+    if (!activeRoute) return
     const activeIds = [activeRoute.from.id, activeRoute.to.id]
 
     AIRPORTS_RF.forEach((airport) => {
-      if (!activeIds.includes(airport.id)) return
+      if (activeIds && !activeIds.includes(airport.id)) return
       const isSelected = airport.id === form.fromAirportId || airport.id === form.toAirportId
+      const isHoveredRegion = hoveredRegionId && airport.region === hoveredRegionId
 
       const marker = L.circleMarker([airport.lat, airport.lon], {
-        radius: isSelected ? 8 : 6,
+        radius: isSelected ? 8 : isHoveredRegion ? 7 : 6,
         color: '#171717',
         weight: isSelected ? 2 : 1,
         fillColor: '#ffd633',
-        fillOpacity: isSelected ? 0.98 : 0.78,
+        fillOpacity: isSelected ? 0.98 : isHoveredRegion ? 0.9 : 0.78,
+      })
+
+      marker.bindTooltip(`${airport.id} - ${airport.city}`, {
+        direction: 'top',
+        offset: [0, -6],
       })
 
       marker.on('click', () => {
         openAirportWeather(airport.id)
+        if (!selectedFlightId) {
+          selectAirportForRoute(airport.id)
+        }
       })
 
       marker.addTo(layer)
     })
-  }, [activeRoute, form.fromAirportId, form.toAirportId, openAirportWeather])
+  }, [
+    activeRoute,
+    form.fromAirportId,
+    form.toAirportId,
+    hoveredRegionId,
+    openAirportWeather,
+    selectedFlightId,
+    selectAirportForRoute,
+  ])
 
-  // Draw route line and fit map to route.
   useEffect(() => {
     if (!mapRef.current || !routeLayerRef.current) return
 
@@ -288,12 +345,9 @@ export default function DispatcherPage() {
 
     if (!activeRoute?.from || !activeRoute?.to) return
 
-    const linePoints = [
-      [activeRoute.from.lat, activeRoute.from.lon],
-      [activeRoute.to.lat, activeRoute.to.lon],
-    ]
+    const routePoints = buildCurvedRoute(activeRoute.from, activeRoute.to)
 
-    L.polyline(linePoints, {
+    L.polyline(routePoints, {
       color: '#0c0c0c',
       weight: 2.8,
       opacity: 0.95,
@@ -333,16 +387,9 @@ export default function DispatcherPage() {
     )
   }, [activeRoute, openAirportWeather])
 
-  // Create flight from form and compute weather risks.
   const createFlight = async () => {
     if (!selectedFrom || !selectedTo) {
       setError('Выберите аэропорт вылета и прилета.')
-      return
-    }
-
-    const routeValidationError = validateRoute(form)
-    if (routeValidationError) {
-      setError(routeValidationError)
       return
     }
 
@@ -381,7 +428,8 @@ export default function DispatcherPage() {
         feasibility: getFeasibility(totalRisk),
       }
 
-      setActiveFlight(flight)
+      setFlights((prev) => [flight, ...prev])
+      setSelectedFlightId(flight.id)
       setSelectedWeatherAirportId(selectedFrom.id)
     } catch {
       setError('Не удалось получить погоду. Проверьте API ключ и сеть.')
@@ -390,7 +438,6 @@ export default function DispatcherPage() {
     }
   }
 
-  // Post-render map size fix for hidden-to-visible mount cases.
   useEffect(() => {
     if (!mapRef.current) return
 
@@ -414,19 +461,12 @@ export default function DispatcherPage() {
                 value={form.fromCity}
                 onChange={(event) => {
                   const city = event.target.value
-                  setForm((prev) => {
-                    const next = { ...prev, fromCity: city, fromAirportId: '' }
-                    const routeValidationError = validateRoute(next)
-                    setError(routeValidationError)
-                    return next
-                  })
+                  setForm((prev) => ({ ...prev, fromCity: city, fromAirportId: '' }))
                 }}
               >
                 <option value="">Выберите город</option>
                 {cities.map((city) => (
-                  <option key={city} value={city} disabled={city === form.toCity}>
-                    {city}
-                  </option>
+                  <option key={city} value={city}>{city}</option>
                 ))}
               </select>
             </label>
@@ -437,19 +477,12 @@ export default function DispatcherPage() {
                 value={form.toCity}
                 onChange={(event) => {
                   const city = event.target.value
-                  setForm((prev) => {
-                    const next = { ...prev, toCity: city, toAirportId: '' }
-                    const routeValidationError = validateRoute(next)
-                    setError(routeValidationError)
-                    return next
-                  })
+                  setForm((prev) => ({ ...prev, toCity: city, toAirportId: '' }))
                 }}
               >
                 <option value="">Выберите город</option>
                 {cities.map((city) => (
-                  <option key={city} value={city} disabled={city === form.fromCity}>
-                    {city}
-                  </option>
+                  <option key={city} value={city}>{city}</option>
                 ))}
               </select>
             </label>
@@ -460,18 +493,13 @@ export default function DispatcherPage() {
                 value={form.fromAirportId}
                 onChange={(event) => {
                   const airportId = event.target.value
-                  setForm((prev) => {
-                    const next = { ...prev, fromAirportId: airportId }
-                    const routeValidationError = validateRoute(next)
-                    setError(routeValidationError)
-                    return next
-                  })
+                  setForm((prev) => ({ ...prev, fromAirportId: airportId }))
                   if (airportId) openAirportWeather(airportId)
                 }}
               >
                 <option value="">Выберите аэропорт</option>
                 {fromAirportOptions.map((airport) => (
-                  <option key={airport.id} value={airport.id} disabled={airport.id === form.toAirportId}>
+                  <option key={airport.id} value={airport.id}>
                     {airport.id} - {airport.name}
                   </option>
                 ))}
@@ -484,18 +512,13 @@ export default function DispatcherPage() {
                 value={form.toAirportId}
                 onChange={(event) => {
                   const airportId = event.target.value
-                  setForm((prev) => {
-                    const next = { ...prev, toAirportId: airportId }
-                    const routeValidationError = validateRoute(next)
-                    setError(routeValidationError)
-                    return next
-                  })
+                  setForm((prev) => ({ ...prev, toAirportId: airportId }))
                   if (airportId) openAirportWeather(airportId)
                 }}
               >
                 <option value="">Выберите аэропорт</option>
                 {toAirportOptions.map((airport) => (
-                  <option key={airport.id} value={airport.id} disabled={airport.id === form.fromAirportId}>
+                  <option key={airport.id} value={airport.id}>
                     {airport.id} - {airport.name}
                   </option>
                 ))}
@@ -520,6 +543,7 @@ export default function DispatcherPage() {
                 onChange={(event) => setForm((prev) => ({ ...prev, flightNumber: event.target.value }))}
               />
             </label>
+
           </div>
 
           <button type="button" className="primary-btn" onClick={createFlight} disabled={isEvaluating}>
@@ -527,6 +551,7 @@ export default function DispatcherPage() {
           </button>
 
           {error && <p className="inline-error">{error}</p>}
+
         </aside>
 
         <section className="panel monitoring-panel">
@@ -542,6 +567,18 @@ export default function DispatcherPage() {
               ))}
             </div>
 
+            {hoveredRegion && (
+              <aside className="hover-region-card">
+                <h4>{hoveredRegion.name}</h4>
+                <p>Аэропорты:</p>
+                <div className="hover-airports">
+                  {hoveredRegionAirports.map((airport) => (
+                    <span key={airport.id}>{airport.id}</span>
+                  ))}
+                </div>
+              </aside>
+            )}
+
             {leafletError && <p className="inline-error map-error">{leafletError}</p>}
             <div ref={mapContainerRef} className="leaflet-map" />
           </div>
@@ -552,50 +589,19 @@ export default function DispatcherPage() {
               {selectedWeatherAirport && selectedWeather ? (
                 <>
                   <p>
-                    <strong>{selectedWeatherAirport.id}</strong> - {selectedWeatherAirport.name},{' '}
-                    {selectedWeatherAirport.city}
+                    <strong>{selectedWeatherAirport.id}</strong> - {selectedWeatherAirport.name}, {selectedWeatherAirport.city}
                   </p>
                   <div className="weather-grid">
-                    <div>
-                      <span>Описание</span>
-                      <strong>{selectedWeather.weather?.[0]?.description ?? 'нет данных'}</strong>
-                    </div>
-                    <div>
-                      <span>Температура</span>
-                      <strong>{formatFixedOrNA(selectedWeather.main?.temp)} C</strong>
-                    </div>
-                    <div>
-                      <span>Ощущается</span>
-                      <strong>{formatFixedOrNA(selectedWeather.main?.feels_like)} C</strong>
-                    </div>
-                    <div>
-                      <span>Ветер</span>
-                      <strong>{formatFixedOrNA(selectedWeather.wind?.speed)} м/с</strong>
-                    </div>
-                    <div>
-                      <span>Порывы</span>
-                      <strong>{formatFixedOrNA(selectedWeather.wind?.gust)} м/с</strong>
-                    </div>
-                    <div>
-                      <span>Видимость</span>
-                      <strong>{formatVisibilityKmOrNA(selectedWeather.visibility)} км</strong>
-                    </div>
-                    <div>
-                      <span>Давление</span>
-                      <strong>{formatIntOrNA(selectedWeather.main?.pressure)} гПа</strong>
-                    </div>
-                    <div>
-                      <span>Влажность</span>
-                      <strong>{formatIntOrNA(selectedWeather.main?.humidity)}%</strong>
-                    </div>
-                    <div>
-                      <span>Облачность</span>
-                      <strong>{formatIntOrNA(selectedWeather.clouds?.all)}%</strong>
-                    </div>
-                    <div>
-                      <span>Осадки</span>
-                      <strong>{formatFixedOrNA(getPrecipPerHour(selectedWeather))} мм/ч</strong>
-                    </div>
+                    <div><span>Описание</span><strong>{selectedWeather.weather?.[0]?.description ?? 'n/a'}</strong></div>
+                    <div><span>Температура</span><strong>{safeNumber(selectedWeather.main?.temp).toFixed(1)} C</strong></div>
+                    <div><span>Ощущается</span><strong>{safeNumber(selectedWeather.main?.feels_like).toFixed(1)} C</strong></div>
+                    <div><span>Ветер</span><strong>{safeNumber(selectedWeather.wind?.speed).toFixed(1)} м/с</strong></div>
+                    <div><span>Порывы</span><strong>{safeNumber(selectedWeather.wind?.gust).toFixed(1)} м/с</strong></div>
+                    <div><span>Видимость</span><strong>{(safeNumber(selectedWeather.visibility, 0) / 1000).toFixed(1)} км</strong></div>
+                    <div><span>Давление</span><strong>{safeNumber(selectedWeather.main?.pressure)} гПа</strong></div>
+                    <div><span>Влажность</span><strong>{safeNumber(selectedWeather.main?.humidity)}%</strong></div>
+                    <div><span>Облачность</span><strong>{safeNumber(selectedWeather.clouds?.all)}%</strong></div>
+                    <div><span>Осадки</span><strong>{getPrecipPerHour(selectedWeather).toFixed(1)} мм/ч</strong></div>
                   </div>
                 </>
               ) : (
@@ -603,67 +609,10 @@ export default function DispatcherPage() {
               )}
             </article>
 
-            <article className="weather-point-card">
-              <h3>Оценка риска по погоде</h3>
-              {activeRisk ? (
-                <div className="risk-block">
-                  <div className="risk-row">
-                    <span>Взлет</span>
-                    <strong>
-                      {activeRisk.departure.score}/100 ({riskLevelLabel(activeRisk.departure.score)})
-                    </strong>
-                  </div>
-                  <div className="risk-track">
-                    <div
-                      className={`risk-fill ${getRiskClass(activeRisk.departure.score)}`}
-                      style={{ width: `${activeRisk.departure.score}%` }}
-                    />
-                  </div>
-
-                  <div className="risk-row">
-                    <span>Посадка</span>
-                    <strong>
-                      {activeRisk.arrival.score}/100 ({riskLevelLabel(activeRisk.arrival.score)})
-                    </strong>
-                  </div>
-                  <div className="risk-track">
-                    <div
-                      className={`risk-fill ${getRiskClass(activeRisk.arrival.score)}`}
-                      style={{ width: `${activeRisk.arrival.score}%` }}
-                    />
-                  </div>
-
-                  <div className="risk-row">
-                    <span>Эшелон ~12 км</span>
-                    <strong>
-                      {activeRisk.cruise.score}/100 ({riskLevelLabel(activeRisk.cruise.score)})
-                    </strong>
-                  </div>
-                  <div className="risk-track">
-                    <div
-                      className={`risk-fill ${getRiskClass(activeRisk.cruise.score)}`}
-                      style={{ width: `${activeRisk.cruise.score}%` }}
-                    />
-                  </div>
-
-                  <div className="risk-row total">
-                    <span>Итоговый риск</span>
-                    <strong>{activeRisk.total}/100 ({riskLevelLabel(activeRisk.total)})</strong>
-                  </div>
-                  <div className="risk-track">
-                    <div
-                      className={`risk-fill ${activeRisk.feasibility.className}`}
-                      style={{ width: `${activeRisk.total}%` }}
-                    />
-                  </div>
-                </div>
-              ) : (
-                <p className="muted">Создайте рейс, чтобы получить расчет риска по текущим погодным условиям.</p>
-              )}
-            </article>
           </section>
         </section>
       </section>
+
     </main>
   )
 }

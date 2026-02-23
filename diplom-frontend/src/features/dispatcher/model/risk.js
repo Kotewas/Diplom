@@ -1,79 +1,58 @@
+export function toRad(value) {
+  return (value * Math.PI) / 180
+}
+
+export function haversineDistanceKm(from, to) {
+  const earthRadiusKm = 6371
+  const dLat = toRad(to.lat - from.lat)
+  const dLon = toRad(to.lon - from.lon)
+  const lat1 = toRad(from.lat)
+  const lat2 = toRad(to.lat)
+
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) * Math.sin(dLon / 2)
+
+  return 2 * earthRadiusKm * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}
+
 export function clampScore(value) {
   return Math.max(0, Math.min(100, Math.round(value)))
 }
 
-export function safeNumber(value) {
-  const num = Number(value)
-  return Number.isFinite(num) ? num : null
+export function safeNumber(value, fallback = 0) {
+  return Number.isFinite(Number(value)) ? Number(value) : fallback
 }
 
 export function getPrecipPerHour(weather) {
   const rain = safeNumber(weather?.rain?.['1h'])
   const snow = safeNumber(weather?.snow?.['1h'])
-  const values = [rain, snow].filter((v) => v != null)
-  if (values.length === 0) 
-  return null // нет данных об осадках
-  return Math.max(...values)
+  return Math.max(rain, snow)
 }
 
 export function evaluateSurfaceRisk(weather) {
   if (!weather) {
-    return {
-      score: 90,
-      factors: ['Нет метеоданных для аэропорта (решение на диспетчере)'],
-      missing: ['weather'],
-    }
+    return { score: 85, factors: ['Нет метеоданных для аэропорта'] }
   }
 
-const missing = []
-const factors = []
-let score = 0
+  const wind = safeNumber(weather.wind?.speed)
+  const gust = safeNumber(weather.wind?.gust, wind)
+  const visibility = safeNumber(weather.visibility, 10000)
+  const pressure = safeNumber(weather.main?.pressure, 1013)
+  const temp = safeNumber(weather.main?.temp, 15)
+  const weatherCode = safeNumber(weather.weather?.[0]?.id, 800)
 
-  const wind = safeNumber(weather?.wind?.speed)
-  if (wind == null) missing.push('wind.speed')
-
-  const gust = safeNumber(weather?.wind?.gust)
-  
-  if (gust == null) missing.push('wind.gust')
-
-  const visibility = safeNumber(weather?.visibility)
-  if (visibility == null) missing.push('visibility')
-
-  const pressure = safeNumber(weather?.main?.pressure)
-  if (pressure == null) missing.push('main.pressure')
-
-  const temp = safeNumber(weather?.main?.temp)
-  if (temp == null) missing.push('main.temp')
-
-  const weatherCode = safeNumber(weather?.weather?.[0]?.id)
-  if (weatherCode == null) missing.push('weather[0].id')
-
-  
-  const criticalMissing = []
-  if (wind == null) criticalMissing.push('Скорость ветра')
-  if (visibility == null) criticalMissing.push('Видимость')
-  if (weatherCode == null) criticalMissing.push('Тип явления (код погоды)')
-
-  if (criticalMissing.length > 0) {
-    return {
-      score: 90,
-      factors: [
-        'Метеоданные неполные — решение на диспетчере',
-        `Не подтянулось: ${criticalMissing.join(', ')}`,
-      ],
-      missing,
-    }
-  }
-
+  let score = 0
+  const factors = []
 
   if (wind >= 12) {
     score += 16
     factors.push(`Ветер ${wind.toFixed(1)} м/с`)
   }
+
   if (wind >= 18) score += 15
 
- 
-  if (gust != null && gust >= 20) {
+  if (gust >= 20) {
     score += 18
     factors.push(`Порывы ${gust.toFixed(1)} м/с`)
   }
@@ -82,14 +61,15 @@ let score = 0
     score += 12
     factors.push(`Видимость ${visibility} м`)
   }
+
   if (visibility < 1500) score += 20
 
-  if (pressure != null && (pressure < 985 || pressure > 1035)) {
+  if (pressure < 985 || pressure > 1035) {
     score += 8
     factors.push(`Давление ${pressure} гПа`)
   }
 
-  if (temp != null && (temp <= -30 || temp >= 38)) {
+  if (temp <= -30 || temp >= 38) {
     score += 8
     factors.push(`Экстремальная температура ${temp.toFixed(1)} C`)
   }
@@ -105,40 +85,25 @@ let score = 0
     factors.push('Туман / дымка')
   }
 
-  if (missing.length > 0) {
-    factors.push(`Часть параметров не подтянулась: ${missing.join(', ')}`)
-  }
-
-  return { score: clampScore(score), factors, missing }
+  return { score: clampScore(score), factors }
 }
 
 export function evaluateCruiseRisk(fromAirport, toAirport, depWeather, arrWeather) {
-  const missing = []
-  const factors = []
-  let score = 10
-
+  const distanceKm = haversineDistanceKm(fromAirport, toAirport)
   const depWind = safeNumber(depWeather?.wind?.speed)
-  if (depWind == null) missing.push('dep wind.speed')
-
   const arrWind = safeNumber(arrWeather?.wind?.speed)
-  if (arrWind == null) missing.push('arr wind.speed')
+  const depPressure = safeNumber(depWeather?.main?.pressure, 1013)
+  const arrPressure = safeNumber(arrWeather?.main?.pressure, 1013)
 
-  const depPressure = safeNumber(depWeather?.main?.pressure)
-  if (depPressure == null) missing.push('dep main.pressure')
+  let score = 10
+  const factors = []
 
-  const arrPressure = safeNumber(arrWeather?.main?.pressure)
-  if (arrPressure == null) missing.push('arr main.pressure')
-
-  if (depWind == null || arrWind == null) {
-    return {
-      score: 90,
-      factors: [
-        'Метеоданные неполные для оценки маршрута — решение на диспетчере',
-        `Не подтянулось: ${missing.join(', ')}`,
-      ],
-      missing,
-    }
+  if (distanceKm >= 2000) {
+    score += 10
+    factors.push('Дальний маршрут')
   }
+
+  if (distanceKm >= 4000) score += 12
 
   const avgAbsLat = (Math.abs(fromAirport.lat) + Math.abs(toAirport.lat)) / 2
   if (avgAbsLat >= 50) {
@@ -151,24 +116,18 @@ export function evaluateCruiseRisk(fromAirport, toAirport, depWeather, arrWeathe
     score += 10
     factors.push('Сильный ветровой фон в концах маршрута')
   }
+
   if (windProxy >= 20) score += 10
 
-  if (depPressure != null && arrPressure != null) {
-    const pressureDelta = Math.abs(depPressure - arrPressure)
-    if (pressureDelta >= 20) {
-      score += 8
-      factors.push('Высокий барический контраст')
-    }
-    if (pressureDelta >= 35) score += 8
-  } else {
-    factors.push('Нет данных о давлении для оценки барического контраста')
+  const pressureDelta = Math.abs(depPressure - arrPressure)
+  if (pressureDelta >= 20) {
+    score += 8
+    factors.push('Высокий барический контраст')
   }
 
-  if (missing.length > 0) {
-    factors.push(`Часть параметров не подтянулась: ${missing.join(', ')}`)
-  }
+  if (pressureDelta >= 35) score += 8
 
-  return { score: clampScore(score), factors, missing }
+  return { score: clampScore(score), distanceKm, factors }
 }
 
 export function getFeasibility(totalRisk) {
@@ -183,4 +142,26 @@ export function riskLevelLabel(score) {
   if (score <= 55) return 'Умеренный'
   if (score <= 75) return 'Высокий'
   return 'Критический'
+}
+
+export function buildCurvedRoute(fromAirport, toAirport) {
+  if (!fromAirport || !toAirport) return []
+
+  const points = []
+  const steps = 48
+  const distanceKm = haversineDistanceKm(fromAirport, toAirport)
+  const arcBoost = Math.min(6, distanceKm / 1500)
+
+  for (let i = 0; i <= steps; i += 1) {
+    const t = i / steps
+    const lat =
+      fromAirport.lat +
+      (toAirport.lat - fromAirport.lat) * t +
+      Math.sin(Math.PI * t) * arcBoost
+
+    const lon = fromAirport.lon + (toAirport.lon - fromAirport.lon) * t
+    points.push([lat, lon])
+  }
+
+  return points
 }
