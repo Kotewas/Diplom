@@ -1,15 +1,7 @@
-import { OPENWEATHER_KEY, WEATHER_API_URL, WEATHER_TTL_MS } from '../model/constants'
+import { API_BASE_URL, WEATHER_TTL_MS } from '../model/constants'
 
 export async function fetchWeatherByAirport(airport) {
-  const params = new URLSearchParams({
-    lat: String(airport.lat),
-    lon: String(airport.lon),
-    appid: OPENWEATHER_KEY,
-    units: 'metric',
-    lang: 'ru',
-  })
-
-  const response = await fetch(`${WEATHER_API_URL}?${params.toString()}`)
+  const response = await fetch(`${API_BASE_URL}/api/weather/${airport.id}`)
   if (!response.ok) {
     throw new Error(`Weather HTTP ${response.status}`)
   }

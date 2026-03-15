@@ -1,0 +1,26 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/diplom_bd
+    username: postgres
+    password: 147855
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+
+app:
+  weather:
+    base-url: https://api.openweathermap.org/data/2.5/weather
+    api-key: 543bce10e8f27c6f0e76565fb383e083
+    ttl-ms: 600000
+  cors:
+    allowed-origins: http://localhost:5173

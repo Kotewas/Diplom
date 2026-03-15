@@ -1,4 +1,3 @@
-// React-хуки для состояния, эффектов, ссылок и оптимизации вычислений
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AIRPORTS_RF } from '../model/constants'
 import {
@@ -10,9 +9,8 @@ import {
   riskLevelLabel,
   safeNumber,
 } from '../model/risk'
-
 import { loadLeafletAssets } from '../services/leafletLoader'
-// Запрос погоды по аэропорту и проверка актуальности кэша
+import { fetchAllFlights, createFlight as createFlightApi } from '../services/flightsApi'
 import { fetchWeatherByAirport, isWeatherCacheFresh } from '../services/weatherApi'
 import './DispatcherPage.css'
 
@@ -22,7 +20,7 @@ const RISK_LEGEND = [
   { label: 'Высокий', className: 'dot-high' },
   { label: 'Критический', className: 'dot-critical' },
 ]
-// Создаёт начальное состояние формы создания рейса
+
 function createInitialForm() {
   return {
     fromCity: '',
@@ -40,71 +38,175 @@ function getRiskClass(score) {
   if (score <= 75) return 'risk-high'
   return 'risk-critical'
 }
-// Форматирует число с фиксированным количеством знаков,если значения нет возвращает 'нет данных'
+
+function asNumberOrNull(value) {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? numeric : null
+}
+
 function formatFixedOrNA(value, digits = 1) {
-  const numeric = safeNumber(value)
+  const numeric = asNumberOrNull(value)
   return numeric == null ? 'нет данных' : numeric.toFixed(digits)
 }
-// Форматирует значение как целое число,если значения нет возвращает 'нет данных'
+
 function formatIntOrNA(value) {
-  const numeric = safeNumber(value)
+  const numeric = asNumberOrNull(value)
   return numeric == null ? 'нет данных' : String(Math.round(numeric))
 }
-// Форматирует видимость: переводит метры в километры и округляет до 1 знака,иначе 'нет данных'
+
 function formatVisibilityKmOrNA(value) {
-  const numeric = safeNumber(value)
+  const numeric = asNumberOrNull(value)
   return numeric == null ? 'нет данных' : (numeric / 1000).toFixed(1)
 }
-// Проверяет корректность маршрута: города и аэропорты вылета/прилёта не должны совпадать
+
 function validateRoute(formState) {
   if (formState.fromCity && formState.toCity && formState.fromCity === formState.toCity) {
     return 'Город вылета и город прилета не должны совпадать'
   }
 
   if (
-    formState.fromAirportId && formState.toAirportId && formState.fromAirportId === formState.toAirportId
+    formState.fromAirportId &&
+    formState.toAirportId &&
+    formState.fromAirportId === formState.toAirportId
   ) {
     return 'Аэропорт вылета и аэропорт прилета не должны совпадать'
   }
 
   return ''
 }
-// Главная страница диспетчера: выбор маршрута, карта, погода и расчёт риска
-export default function DispatcherPage() {
-// Ссылки (refs) для работы с картой Leaflet и хранения служебных данных
-  const mapContainerRef = useRef(null)      // DOM-элемент,в котором отображается карта
-  const mapRef = useRef(null)               // Экземпляр карты Leaflet для управления масштабом и положением
-  const airportLayerRef = useRef(null)      // Слой карты для отображения маркеров аэропортов
-  const routeLayerRef = useRef(null)        // Слой карты для отображения маршрута (линия полёта)
-  const weatherCacheRef = useRef({})        // Локальный кэш погодных данных,чтобы не выполнять повторные запросы
 
-// Флаг успешной загрузки Leaflet если true — карта готова к использованию
+function parseDateTime(value) {
+  if (!value) return null
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value
+  }
+
+  if (typeof value === 'number') {
+    const fromTimestamp = new Date(value)
+    return Number.isNaN(fromTimestamp.getTime()) ? null : fromTimestamp
+  }
+
+  if (typeof value !== 'string') return null
+
+  const nativeDate = new Date(value)
+  if (!Number.isNaN(nativeDate.getTime())) return nativeDate
+
+  const match = value.match(
+    /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?$/,
+  )
+  if (!match) return null
+
+  const [, year, month, day, hours, minutes, seconds = '0', fraction = '0'] = match
+  const milliseconds = Number((fraction + '000').slice(0, 3))
+
+  const parsed = new Date(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hours),
+    Number(minutes),
+    Number(seconds),
+    milliseconds,
+  )
+
+  return Number.isNaN(parsed.getTime()) ? null : parsed
+}
+
+function haversineDistanceKm(fromAirport, toAirport) {
+  const earthRadiusKm = 6371
+  const latDistanceRad = ((toAirport.lat - fromAirport.lat) * Math.PI) / 180
+  const lonDistanceRad = ((toAirport.lon - fromAirport.lon) * Math.PI) / 180
+  const startLatRad = (fromAirport.lat * Math.PI) / 180
+  const endLatRad = (toAirport.lat * Math.PI) / 180
+
+  const a =
+    Math.sin(latDistanceRad / 2) * Math.sin(latDistanceRad / 2) +
+    Math.cos(startLatRad) *
+      Math.cos(endLatRad) *
+      Math.sin(lonDistanceRad / 2) *
+      Math.sin(lonDistanceRad / 2)
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+  return earthRadiusKm * c
+}
+
+function formatDateTime(value) {
+  const date = parseDateTime(value)
+  if (!date) return 'нет данных'
+  return date.toLocaleString('ru-RU')
+}
+
+function formatTimeLeftToDeparture(value, nowTimestamp) {
+  const departureDate = parseDateTime(value)
+  if (!departureDate) return 'осталось: нет данных'
+
+  const diffMs = departureDate.getTime() - nowTimestamp
+  if (diffMs <= 0) return 'вылет уже прошел'
+
+  const totalHours = Math.ceil(diffMs / (1000 * 60 * 60))
+  const days = Math.floor(totalHours / 24)
+  const hours = totalHours % 24
+
+  return `осталось: ${days} д ${hours} ч`
+}
+
+export default function DispatcherPage() {
+  const mapContainerRef = useRef(null)
+  const mapRef = useRef(null)
+  const airportLayerRef = useRef(null)
+  const routeLayerRef = useRef(null)
+  const weatherCacheRef = useRef({})
+
   const [leafletReady, setLeafletReady] = useState(false)
   const [leafletError, setLeafletError] = useState('')
+  const [activeTab, setActiveTab] = useState('monitoring')
 
-// Состояние формы создания рейса (города, аэропорты, дата, номер рейса)
   const [form, setForm] = useState(createInitialForm)
 
-// Текущий рассчитанный рейс с результатами оценки риска null если ещё не создан
   const [activeFlight, setActiveFlight] = useState(null)
+  const [allFlights, setAllFlights] = useState([])
+  const [isLoadingFlights, setIsLoadingFlights] = useState(true)
+  const [flightsError, setFlightsError] = useState('')
 
   const [selectedWeatherAirportId, setSelectedWeatherAirportId] = useState('')
-// Кеш погодных данных по аэропортам 
   const [weatherByAirport, setWeatherByAirport] = useState({})
-// Флаг выполнения расчёта риска
+
   const [isEvaluating, setIsEvaluating] = useState(false)
+  const [isPreviewEvaluating, setIsPreviewEvaluating] = useState(false)
+  const [previewRisk, setPreviewRisk] = useState(null)
   const [error, setError] = useState('')
-// Создаёт словарь аэропортов по id для быстрого доступа к данным
+  const [timeTick, setTimeTick] = useState(() => Date.now())
+
   const airportsById = useMemo(
     () => Object.fromEntries(AIRPORTS_RF.map((airport) => [airport.id, airport])),
     [],
   )
-// Формирует отсортированный список уникальных городов для выпадающего меню
+
+  const getFlightArrivalForTable = useCallback(
+    (flight) => {
+      if (flight?.arrivalAt) return flight.arrivalAt
+
+      const fromAirport = airportsById[flight?.fromAirportId]
+      const toAirport = airportsById[flight?.toAirportId]
+      const departureAt = parseDateTime(flight?.departureAt)
+
+      if (!fromAirport || !toAirport || !departureAt) return null
+
+      const distanceKm = haversineDistanceKm(fromAirport, toAirport)
+      const enrouteMinutes = Math.round((distanceKm / 820) * 60)
+      const totalMinutes = Math.max(35, enrouteMinutes + 25)
+
+      return new Date(departureAt.getTime() + totalMinutes * 60 * 1000)
+    },
+    [airportsById],
+  )
+
   const cities = useMemo(
     () => [...new Set(AIRPORTS_RF.map((airport) => airport.city))].sort((a, b) => a.localeCompare(b)),
     [],
   )
-// Список аэропортов для выбранного города вылета 
+
   const fromAirportOptions = useMemo(() => {
     if (!form.fromCity) return []
     return AIRPORTS_RF.filter((airport) => airport.city === form.fromCity)
@@ -114,10 +216,10 @@ export default function DispatcherPage() {
     if (!form.toCity) return []
     return AIRPORTS_RF.filter((airport) => airport.city === form.toCity)
   }, [form.toCity])
-// Выбранный аэропорт вылета или null, если не выбран
+
   const selectedFrom = form.fromAirportId ? airportsById[form.fromAirportId] : null
   const selectedTo = form.toAirportId ? airportsById[form.toAirportId] : null
-//Текущий маршрут для карты
+
   const activeRoute = useMemo(() => {
     if (activeFlight) {
       return {
@@ -129,9 +231,8 @@ export default function DispatcherPage() {
     if (!selectedFrom || !selectedTo) return null
     return { from: selectedFrom, to: selectedTo }
   }, [activeFlight, airportsById, selectedFrom, selectedTo])
-// Аэропорт, для которого сейчас показываем погоду
+
   const selectedWeatherAirport = selectedWeatherAirportId ? airportsById[selectedWeatherAirportId] : null
-// Погодные данные выбранного аэропорта из кэша
   const selectedWeather = selectedWeatherAirportId ? weatherByAirport[selectedWeatherAirportId]?.data : null
 
   const activeRisk = useMemo(() => {
@@ -148,7 +249,37 @@ export default function DispatcherPage() {
   useEffect(() => {
     weatherCacheRef.current = weatherByAirport
   }, [weatherByAirport])
-  // Загружаем Leaflet один раз при запуске страницы
+
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      setTimeTick(Date.now())
+    }, 60000)
+
+    return () => clearInterval(intervalId)
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+
+    fetchAllFlights()
+      .then((flights) => {
+        if (cancelled) return
+        setAllFlights(Array.isArray(flights) ? flights : [])
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setFlightsError('Не удалось загрузить список рейсов с backend.')
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingFlights(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
 
@@ -166,7 +297,7 @@ export default function DispatcherPage() {
       cancelled = true
     }
   }, [])
-// Создаём Leaflet-карту после загрузки библиотеки 
+
   useEffect(() => {
     if (!leafletReady || !mapContainerRef.current || mapRef.current) return
 
@@ -185,7 +316,6 @@ export default function DispatcherPage() {
     }).addTo(map)
     L.control.zoom({ position: 'topright' }).addTo(map)
 
-    
     setTimeout(() => map.invalidateSize(), 0)
 
     airportLayerRef.current = L.layerGroup().addTo(map)
@@ -196,18 +326,21 @@ export default function DispatcherPage() {
       map.remove()
       mapRef.current = null
     }
-  }, [leafletReady]) // Эффект создания карты запускается после успешной загрузки Leaflet
-// Пытаемся взять погоду из локального кэша по airportId
+  }, [leafletReady])
+
   const ensureWeather = useCallback(
     async (airportId) => {
       const cached = weatherCacheRef.current[airportId]
       if (isWeatherCacheFresh(cached)) {
         return cached.data
       }
-// Если кэша нет или он устарел — запрашиваем погоду по координатам аэропорта
+
       const airport = airportsById[airportId]
+      if (!airport) {
+        throw new Error('Airport is not found')
+      }
+
       const data = await fetchWeatherByAirport(airport)
-// Сохраняем полученные данные в state-кэш с временем получения 
       setWeatherByAirport((prev) => ({
         ...prev,
         [airportId]: { data, fetchedAt: new Date().toISOString() },
@@ -217,7 +350,7 @@ export default function DispatcherPage() {
     },
     [airportsById],
   )
-// Запоминаем выбранный аэропорт для отображения карточки погоды
+
   const openAirportWeather = useCallback(
     async (airportId) => {
       setSelectedWeatherAirportId(airportId)
@@ -229,7 +362,61 @@ export default function DispatcherPage() {
     },
     [ensureWeather],
   )
- // рисуем маркеры (точки) аэропортов на карте
+
+  useEffect(() => {
+    if (activeFlight) {
+      setPreviewRisk(null)
+      setIsPreviewEvaluating(false)
+      return
+    }
+
+    if (!selectedFrom || !selectedTo) {
+      setPreviewRisk(null)
+      setIsPreviewEvaluating(false)
+      return
+    }
+
+    const routeValidationError = validateRoute(form)
+    if (routeValidationError) {
+      setPreviewRisk(null)
+      setIsPreviewEvaluating(false)
+      return
+    }
+
+    let cancelled = false
+    setIsPreviewEvaluating(true)
+
+    Promise.all([ensureWeather(selectedFrom.id), ensureWeather(selectedTo.id)])
+      .then(([depWeather, arrWeather]) => {
+        if (cancelled) return
+
+        const departureRisk = evaluateSurfaceRisk(depWeather)
+        const arrivalRisk = evaluateSurfaceRisk(arrWeather)
+        const cruiseRisk = evaluateCruiseRisk(selectedFrom, selectedTo, depWeather, arrWeather)
+        const totalRisk = clampScore(
+          departureRisk.score * 0.4 + arrivalRisk.score * 0.4 + cruiseRisk.score * 0.2,
+        )
+
+        setPreviewRisk({
+          total: totalRisk,
+          departure: departureRisk,
+          arrival: arrivalRisk,
+          cruise: cruiseRisk,
+          feasibility: getFeasibility(totalRisk),
+        })
+      })
+      .catch(() => {
+        if (!cancelled) setPreviewRisk(null)
+      })
+      .finally(() => {
+        if (!cancelled) setIsPreviewEvaluating(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeFlight, ensureWeather, form, selectedFrom, selectedTo])
+
   useEffect(() => {
     if (!mapRef.current || !airportLayerRef.current) return
 
@@ -238,7 +425,7 @@ export default function DispatcherPage() {
     layer.clearLayers()
 
     if (!activeRoute?.from || !activeRoute?.to) return
-  // Список ID двух активных аэропортов: вылет и прилёт
+
     const activeIds = [activeRoute.from.id, activeRoute.to.id]
 
     AIRPORTS_RF.forEach((airport) => {
@@ -259,13 +446,8 @@ export default function DispatcherPage() {
 
       marker.addTo(layer)
     })
-  }, [
-    activeRoute,
-    form.fromAirportId,
-    form.toAirportId,
-    openAirportWeather,
-  ])
-//рисуем маршрут (линию) и две точки (вылет/прилёт) на карте
+  }, [activeRoute, form.fromAirportId, form.toAirportId, openAirportWeather])
+
   useEffect(() => {
     if (!mapRef.current || !routeLayerRef.current) return
 
@@ -319,13 +501,13 @@ export default function DispatcherPage() {
       { padding: [40, 40], maxZoom: 6 },
     )
   }, [activeRoute, openAirportWeather])
-//создаём рейс и считаем риск по погоде
+
   const createFlight = async () => {
     if (!selectedFrom || !selectedTo) {
       setError('Выберите аэропорт вылета и прилета.')
       return
     }
- // проверка логики маршрута (город/аэропорт не должны совпадать)
+
     const routeValidationError = validateRoute(form)
     if (routeValidationError) {
       setError(routeValidationError)
@@ -341,28 +523,22 @@ export default function DispatcherPage() {
     setIsEvaluating(true)
 
     try {
-// Запрашиваем погоду сразу для двух точек
       const [depWeather, arrWeather] = await Promise.all([
         ensureWeather(selectedFrom.id),
         ensureWeather(selectedTo.id),
       ])
 
-// оцениваем риск на земле для вылета (взлёт)
-    const departureRisk = evaluateSurfaceRisk(depWeather)
-// оцениваем риск на земле для прилёта (посадка)
-    const arrivalRisk = evaluateSurfaceRisk(arrWeather)
-// оцениваем риск по маршруту (эшелон/перелёт)
-    const cruiseRisk = evaluateCruiseRisk(selectedFrom, selectedTo, depWeather, arrWeather)
-// итоговый риск — взвешенная сумма (вылет 40%, прилёт 40%, маршрут 20%)
-    const totalRisk = clampScore(
-      departureRisk.score * 0.4 + arrivalRisk.score * 0.4 + cruiseRisk.score * 0.2,
-    )
-// Итоговая реализуемость рейса 
-      const flight = {
-        id: `flight_${Date.now()}`,
-        createdAt: new Date().toISOString(),
+      const departureRisk = evaluateSurfaceRisk(depWeather)
+      const arrivalRisk = evaluateSurfaceRisk(arrWeather)
+      const cruiseRisk = evaluateCruiseRisk(selectedFrom, selectedTo, depWeather, arrWeather)
+      const totalRisk = clampScore(
+        departureRisk.score * 0.4 + arrivalRisk.score * 0.4 + cruiseRisk.score * 0.2,
+      )
+
+      const savedFlight = await createFlightApi({
         flightNumber: form.flightNumber.trim().toUpperCase(),
         departureAt: form.departureAt,
+        arrivalAt: null,
         fromAirportId: selectedFrom.id,
         toAirportId: selectedTo.id,
         departureRisk,
@@ -370,17 +546,20 @@ export default function DispatcherPage() {
         cruiseRisk,
         totalRisk,
         feasibility: getFeasibility(totalRisk),
-      }
+      })
 
-      setActiveFlight(flight)
+      setActiveFlight(savedFlight)
+      setAllFlights((prev) => [savedFlight, ...prev.filter((flight) => flight.id !== savedFlight.id)])
       setSelectedWeatherAirportId(selectedFrom.id)
+      setForm(createInitialForm())
+      setActiveTab('monitoring')
     } catch {
-      setError('Не удалось получить погоду. Проверьте API ключ и сеть.')
+      setError('Не удалось создать рейс. Проверьте backend и доступ к погодному API.')
     } finally {
       setIsEvaluating(false)
     }
   }
-// После первого рендера пересчитываем размер карты Leaflet, чтобы она корректно отобразилась
+
   useEffect(() => {
     if (!mapRef.current) return
 
@@ -390,19 +569,53 @@ export default function DispatcherPage() {
 
     return () => clearTimeout(timer)
   }, [])
-// Разметка страницы
+
+  const openFlightFromList = useCallback((flight) => {
+    if (!flight) return
+    setActiveFlight(flight)
+    setSelectedWeatherAirportId(flight.fromAirportId)
+    setActiveTab('monitoring')
+  }, [])
+
+  useEffect(() => {
+    if (activeTab !== 'monitoring') return
+    if (!mapRef.current) return
+    const timer = setTimeout(() => {
+      mapRef.current?.invalidateSize()
+    }, 0)
+    return () => clearTimeout(timer)
+  }, [activeTab])
+
   return (
     <main className="dispatcher-app">
-      <section className="content-grid">
+      <section className="tabs-row panel">
+        <button
+          type="button"
+          className={`tab-btn ${activeTab === 'monitoring' ? 'active' : ''}`}
+          onClick={() => setActiveTab('monitoring')}
+        >
+          Мониторинг
+        </button>
+        <button
+          type="button"
+          className={`tab-btn ${activeTab === 'flights' ? 'active' : ''}`}
+          onClick={() => setActiveTab('flights')}
+        >
+          Рейсы
+        </button>
+      </section>
+
+      <section className={`content-grid ${activeTab === 'monitoring' ? '' : 'is-hidden'}`}>
         <aside className="panel flight-creator">
           <h2>Создание рейса</h2>
 
           <div className="form-grid">
             <label className="route-field">
-              Город отправления 
+              Город отправления
               <select
                 value={form.fromCity}
                 onChange={(event) => {
+                  setActiveFlight(null)
                   const city = event.target.value
                   setForm((prev) => {
                     const next = { ...prev, fromCity: city, fromAirportId: '' }
@@ -426,6 +639,7 @@ export default function DispatcherPage() {
               <select
                 value={form.toCity}
                 onChange={(event) => {
+                  setActiveFlight(null)
                   const city = event.target.value
                   setForm((prev) => {
                     const next = { ...prev, toCity: city, toAirportId: '' }
@@ -449,6 +663,7 @@ export default function DispatcherPage() {
               <select
                 value={form.fromAirportId}
                 onChange={(event) => {
+                  setActiveFlight(null)
                   const airportId = event.target.value
                   setForm((prev) => {
                     const next = { ...prev, fromAirportId: airportId }
@@ -473,6 +688,7 @@ export default function DispatcherPage() {
               <select
                 value={form.toAirportId}
                 onChange={(event) => {
+                  setActiveFlight(null)
                   const airportId = event.target.value
                   setForm((prev) => {
                     const next = { ...prev, toAirportId: airportId }
@@ -510,7 +726,6 @@ export default function DispatcherPage() {
                 onChange={(event) => setForm((prev) => ({ ...prev, flightNumber: event.target.value }))}
               />
             </label>
-
           </div>
 
           <button type="button" className="primary-btn" onClick={createFlight} disabled={isEvaluating}>
@@ -518,7 +733,6 @@ export default function DispatcherPage() {
           </button>
 
           {error && <p className="inline-error">{error}</p>}
-
         </aside>
 
         <section className="panel monitoring-panel">
@@ -544,19 +758,50 @@ export default function DispatcherPage() {
               {selectedWeatherAirport && selectedWeather ? (
                 <>
                   <p>
-                    <strong>{selectedWeatherAirport.id}</strong> - {selectedWeatherAirport.name}, {selectedWeatherAirport.city}
+                    <strong>{selectedWeatherAirport.id}</strong> - {selectedWeatherAirport.name},{' '}
+                    {selectedWeatherAirport.city}
                   </p>
                   <div className="weather-grid">
-                    <div><span>Описание</span><strong>{selectedWeather.weather?.[0]?.description ?? 'нет данных'}</strong></div>
-                    <div><span>Температура</span><strong>{formatFixedOrNA(selectedWeather.main?.temp)} C</strong></div>
-                    <div><span>Ощущается</span><strong>{formatFixedOrNA(selectedWeather.main?.feels_like)} C</strong></div>
-                    <div><span>Ветер</span><strong>{formatFixedOrNA(selectedWeather.wind?.speed)} м/с</strong></div>
-                    <div><span>Порывы</span><strong>{formatFixedOrNA(selectedWeather.wind?.gust)} м/с</strong></div>
-                    <div><span>Видимость</span><strong>{formatVisibilityKmOrNA(selectedWeather.visibility)} км</strong></div>
-                    <div><span>Давление</span><strong>{formatIntOrNA(selectedWeather.main?.pressure)} гПа</strong></div>
-                    <div><span>Влажность</span><strong>{formatIntOrNA(selectedWeather.main?.humidity)}%</strong></div>
-                    <div><span>Облачность</span><strong>{formatIntOrNA(selectedWeather.clouds?.all)}%</strong></div>
-                    <div><span>Осадки</span><strong>{formatFixedOrNA(getPrecipPerHour(selectedWeather))} мм/ч</strong></div>
+                    <div>
+                      <span>Описание</span>
+                      <strong>{selectedWeather.weather?.[0]?.description ?? 'нет данных'}</strong>
+                    </div>
+                    <div>
+                      <span>Температура</span>
+                      <strong>{formatFixedOrNA(selectedWeather.main?.temp)} C</strong>
+                    </div>
+                    <div>
+                      <span>Ощущается</span>
+                      <strong>{formatFixedOrNA(selectedWeather.main?.feels_like)} C</strong>
+                    </div>
+                    <div>
+                      <span>Ветер</span>
+                      <strong>{formatFixedOrNA(selectedWeather.wind?.speed)} м/с</strong>
+                    </div>
+                    <div>
+                      <span>Порывы</span>
+                      <strong>{formatFixedOrNA(selectedWeather.wind?.gust)} м/с</strong>
+                    </div>
+                    <div>
+                      <span>Видимость</span>
+                      <strong>{formatVisibilityKmOrNA(selectedWeather.visibility)} км</strong>
+                    </div>
+                    <div>
+                      <span>Давление</span>
+                      <strong>{formatIntOrNA(selectedWeather.main?.pressure)} гПа</strong>
+                    </div>
+                    <div>
+                      <span>Влажность</span>
+                      <strong>{formatIntOrNA(selectedWeather.main?.humidity)}%</strong>
+                    </div>
+                    <div>
+                      <span>Облачность</span>
+                      <strong>{formatIntOrNA(selectedWeather.clouds?.all)}%</strong>
+                    </div>
+                    <div>
+                      <span>Осадки</span>
+                      <strong>{formatFixedOrNA(getPrecipPerHour(selectedWeather))} мм/ч</strong>
+                    </div>
                   </div>
                 </>
               ) : (
@@ -566,49 +811,116 @@ export default function DispatcherPage() {
 
             <article className="weather-point-card">
               <h3>Оценка риска по погоде</h3>
-              {activeRisk ? (
+              {activeRisk || previewRisk ? (
                 <div className="risk-block">
+                  {!activeRisk && previewRisk && (
+                    <p className="muted">Предварительная оценка до создания рейса.</p>
+                  )}
                   <div className="risk-row">
                     <span>Взлет</span>
-                    <strong>{activeRisk.departure.score}/100 ({riskLevelLabel(activeRisk.departure.score)})</strong>
+                    <strong>
+                      {(activeRisk ?? previewRisk).departure.score}/100 ({riskLevelLabel((activeRisk ?? previewRisk).departure.score)})
+                    </strong>
                   </div>
                   <div className="risk-track">
-                    <div className={`risk-fill ${getRiskClass(activeRisk.departure.score)}`} style={{ width: `${activeRisk.departure.score}%` }} />
+                    <div
+                      className={`risk-fill ${getRiskClass((activeRisk ?? previewRisk).departure.score)}`}
+                      style={{ width: `${(activeRisk ?? previewRisk).departure.score}%` }}
+                    />
                   </div>
 
                   <div className="risk-row">
                     <span>Посадка</span>
-                    <strong>{activeRisk.arrival.score}/100 ({riskLevelLabel(activeRisk.arrival.score)})</strong>
+                    <strong>
+                      {(activeRisk ?? previewRisk).arrival.score}/100 ({riskLevelLabel((activeRisk ?? previewRisk).arrival.score)})
+                    </strong>
                   </div>
                   <div className="risk-track">
-                    <div className={`risk-fill ${getRiskClass(activeRisk.arrival.score)}`} style={{ width: `${activeRisk.arrival.score}%` }} />
+                    <div
+                      className={`risk-fill ${getRiskClass((activeRisk ?? previewRisk).arrival.score)}`}
+                      style={{ width: `${(activeRisk ?? previewRisk).arrival.score}%` }}
+                    />
                   </div>
 
                   <div className="risk-row">
                     <span>Эшелон ~12 км</span>
-                    <strong>{activeRisk.cruise.score}/100 ({riskLevelLabel(activeRisk.cruise.score)})</strong>
+                    <strong>
+                      {(activeRisk ?? previewRisk).cruise.score}/100 ({riskLevelLabel((activeRisk ?? previewRisk).cruise.score)})
+                    </strong>
                   </div>
                   <div className="risk-track">
-                    <div className={`risk-fill ${getRiskClass(activeRisk.cruise.score)}`} style={{ width: `${activeRisk.cruise.score}%` }} />
+                    <div
+                      className={`risk-fill ${getRiskClass((activeRisk ?? previewRisk).cruise.score)}`}
+                      style={{ width: `${(activeRisk ?? previewRisk).cruise.score}%` }}
+                    />
                   </div>
 
                   <div className="risk-row total">
                     <span>Итоговый риск</span>
-                    <strong>{activeRisk.total}/100 ({riskLevelLabel(activeRisk.total)})</strong>
+                    <strong>
+                      {(activeRisk ?? previewRisk).total}/100 ({riskLevelLabel((activeRisk ?? previewRisk).total)})
+                    </strong>
                   </div>
                   <div className="risk-track">
-                    <div className={`risk-fill ${activeRisk.feasibility.className}`} style={{ width: `${activeRisk.total}%` }} />
+                    <div
+                      className={`risk-fill ${(activeRisk ?? previewRisk).feasibility.className}`}
+                      style={{ width: `${(activeRisk ?? previewRisk).total}%` }}
+                    />
                   </div>
                 </div>
+              ) : isPreviewEvaluating ? (
+                <p className="muted">Предварительный расчет риска...</p>
               ) : (
                 <p className="muted">Создайте рейс, чтобы получить расчет риска по текущим погодным условиям.</p>
               )}
             </article>
-
           </section>
         </section>
       </section>
 
+      {activeTab === 'flights' && (
+      <section className="panel flights-panel">
+        <h2>Все рейсы</h2>
+        {isLoadingFlights ? (
+          <p className="muted">Загружаем рейсы...</p>
+        ) : allFlights.length === 0 ? (
+          <p className="muted">Пока нет созданных рейсов.</p>
+        ) : (
+          <div className="flights-table-wrap">
+            <table className="flights-table">
+              <thead>
+                <tr>
+                  <th>Рейс</th>
+                  <th>Маршрут</th>
+                  <th>Вылет</th>
+                  <th>Прилет</th>
+                  <th>Риск</th>
+                </tr>
+              </thead>
+              <tbody>
+                {allFlights.map((flight) => (
+                  <tr key={flight.id} onClick={() => openFlightFromList(flight)}>
+                    <td>{flight.flightNumber}</td>
+                    <td>
+                      {flight.fromAirportId} - {flight.toAirportId}
+                    </td>
+                    <td>
+                      <div className="departure-cell">
+                        <span>{formatDateTime(flight.departureAt)}</span>
+                        <span className="departure-remaining">{formatTimeLeftToDeparture(flight.departureAt, timeTick)}</span>
+                      </div>
+                    </td>
+                    <td>{formatDateTime(getFlightArrivalForTable(flight))}</td>
+                    <td>{safeNumber(flight.totalRisk, 0)}/100</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {flightsError && <p className="inline-error">{flightsError}</p>}
+      </section>
+      )}
     </main>
   )
 }

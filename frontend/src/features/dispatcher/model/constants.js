@@ -1,8 +1,4 @@
-export const OPENWEATHER_KEY =
-  import.meta.env.VITE_OPENWEATHER_API_KEY || '6caf1d630c4003100be8cc71f89d647f'
-
-export const WEATHER_API_URL = 'https://api.openweathermap.org/data/2.5/weather'
-export const FLIGHTS_STORAGE_KEY = 'dispatcher_flights_v4'
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
 export const WEATHER_TTL_MS = 10 * 60 * 1000
 
 export const AIRCRAFT_MODELS = [
