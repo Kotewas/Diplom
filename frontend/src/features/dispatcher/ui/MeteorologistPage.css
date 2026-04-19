@@ -1,0 +1,76 @@
+.meteorologist-page {
+  color: #11211f;
+}
+
+.chat-list {
+  display: grid;
+  gap: 8px;
+}
+
+.chat-item {
+  width: 100%;
+  text-align: left;
+  border: 1px solid rgba(17, 33, 31, 0.16);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.9);
+  padding: 10px;
+  display: grid;
+  gap: 6px;
+  cursor: pointer;
+  transition: transform 120ms ease, box-shadow 160ms ease;
+}
+
+.chat-item:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(17, 33, 31, 0.08);
+}
+
+.chat-item.active {
+  border-color: rgba(18, 153, 128, 0.6);
+  box-shadow: 0 0 0 2px rgba(18, 153, 128, 0.18);
+}
+
+.chat-item.incoming {
+  border-left: 4px solid #228be6;
+}
+
+.chat-item.outgoing {
+  border-left: 4px solid #12b886;
+}
+
+.chat-item.incoming.unread {
+  border-left-color: #e03131;
+  background: rgba(255, 245, 245, 0.94);
+}
+
+.chat-item.incoming.answered {
+  border-left-color: #12b886;
+  background: rgba(239, 250, 246, 0.94);
+}
+
+.chat-item-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chat-item-top strong {
+  color: #1b3330;
+  font-size: 13px;
+}
+
+.chat-item-top span {
+  color: #5c7471;
+  font-size: 12px;
+}
+
+.chat-item p {
+  margin: 0;
+  color: #254542;
+  font-size: 13px;
+}
+
+.chat-item small {
+  color: #5b736f;
+  font-size: 12px;
+}

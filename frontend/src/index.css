@@ -1,10 +1,10 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap');
 
 :root {
-  font-family: 'Inter', 'Segoe UI', 'Trebuchet MS', sans-serif;
+  font-family: 'Manrope', 'IBM Plex Sans', 'Segoe UI', sans-serif;
   line-height: 1.4;
-  color: #122234;
-  background: #f2f7ff;
+  color: #0d1f1d;
+  background: #f5f8f6;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -18,5 +18,14 @@
 body {
   margin: 0;
   min-width: 320px;
-  background: #f2f7ff;
+  background:
+    radial-gradient(circle at 10% -10%, rgba(69, 196, 171, 0.18) 0%, rgba(69, 196, 171, 0) 38%),
+    radial-gradient(circle at 100% 0%, rgba(173, 184, 255, 0.14) 0%, rgba(173, 184, 255, 0) 36%),
+    linear-gradient(180deg, #f8faf8 0%, #eef4f1 100%);
+  color: #0d1f1d;
+}
+
+#root {
+  min-height: 100vh;
+  padding: clamp(12px, 2vw, 24px);
 }

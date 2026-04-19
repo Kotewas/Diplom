@@ -40,38 +40,73 @@ export function evaluateSurfaceRisk(weather) {
   const visibility = safeNumber(weather.visibility, 10000)
   const pressure = safeNumber(weather.main?.pressure, 1013)
   const temp = safeNumber(weather.main?.temp, 15)
+  const cloudiness = safeNumber(weather.clouds?.all)
+  const precipPerHour = getPrecipPerHour(weather)
   const weatherCode = safeNumber(weather.weather?.[0]?.id, 800)
 
   let score = 0
   const factors = []
 
+  if (wind >= 8) {
+    score += 8
+    factors.push(`Умеренный ветер ${wind.toFixed(1)} м/с`)
+  }
+
   if (wind >= 12) {
-    score += 16
+    score += 10
     factors.push(`Ветер ${wind.toFixed(1)} м/с`)
   }
 
-  if (wind >= 18) score += 15
+  if (wind >= 18) score += 12
 
-  if (gust >= 20) {
-    score += 18
+  if (gust >= 12) {
+    score += 7
     factors.push(`Порывы ${gust.toFixed(1)} м/с`)
   }
 
-  if (visibility < 5000) {
+  if (gust >= 20) {
     score += 12
+  }
+
+  if (visibility < 8000) {
+    score += 6
+    factors.push(`Сниженная видимость ${visibility} м`)
+  }
+
+  if (visibility < 5000) {
+    score += 10
     factors.push(`Видимость ${visibility} м`)
   }
 
-  if (visibility < 1500) score += 20
+  if (visibility < 1500) score += 18
+
+  if (pressure < 995 || pressure > 1030) {
+    score += 5
+    factors.push(`Нестабильное давление ${pressure} гПа`)
+  }
 
   if (pressure < 985 || pressure > 1035) {
-    score += 8
+    score += 6
     factors.push(`Давление ${pressure} гПа`)
   }
 
   if (temp <= -30 || temp >= 38) {
     score += 8
     factors.push(`Экстремальная температура ${temp.toFixed(1)} C`)
+  }
+
+  if (cloudiness >= 85) {
+    score += 4
+    factors.push(`Плотная облачность ${Math.round(cloudiness)}%`)
+  }
+
+  if (precipPerHour >= 0.2) {
+    score += 6
+    factors.push(`Осадки ${precipPerHour.toFixed(1)} мм/ч`)
+  }
+
+  if (precipPerHour >= 1) {
+    score += 8
   }
 
   if (weatherCode >= 200 && weatherCode < 300) {

@@ -1,4 +1,32 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  ActionIcon,
+  Alert,
+  Badge,
+  Box,
+  Button,
+  Card,
+  Divider,
+  Grid,
+  Group,
+  Modal,
+  NativeSelect,
+  Paper,
+  Progress,
+  SegmentedControl,
+  SimpleGrid,
+  Stack,
+  Table,
+  Text,
+  TextInput,
+  Title,
+} from '@mantine/core'
+import {
+  IconAlertCircle,
+  IconMessageCircle,
+  IconRefresh,
+  IconTrash,
+} from '@tabler/icons-react'
 import { AIRPORTS_RF } from '../model/constants'
 import {
   clampScore,
@@ -10,7 +38,13 @@ import {
   safeNumber,
 } from '../model/risk'
 import { loadLeafletAssets } from '../services/leafletLoader'
-import { fetchAllFlights, createFlight as createFlightApi } from '../services/flightsApi'
+import {
+  cancelFlight as cancelFlightApi,
+  createFlight as createFlightApi,
+  fetchAllFlights,
+  refreshFlightRisk as refreshFlightRiskApi,
+} from '../services/flightsApi'
+import { readFlightsCache, writeFlightsCache } from '../services/flightsCacheStorage'
 import { fetchWeatherByAirport, isWeatherCacheFresh } from '../services/weatherApi'
 import './DispatcherPage.css'
 
@@ -21,6 +55,8 @@ const RISK_LEGEND = [
   { label: 'Критический', className: 'dot-critical' },
 ]
 
+const AIRLINE_IATA_CODES = ['SU', 'DP', 'FV', 'UT', 'EO', 'YC', 'WZ', 'RA']
+
 function createInitialForm() {
   return {
     fromCity: '',
@@ -28,15 +64,16 @@ function createInitialForm() {
     fromAirportId: '',
     toAirportId: '',
     departureAt: '',
-    flightNumber: '',
+    airlineCode: AIRLINE_IATA_CODES[0],
+    flightDigits: '',
   }
 }
 
-function getRiskClass(score) {
-  if (score <= 30) return 'risk-low'
-  if (score <= 55) return 'risk-medium'
-  if (score <= 75) return 'risk-high'
-  return 'risk-critical'
+function getRiskColor(score) {
+  if (score <= 30) return 'teal'
+  if (score <= 55) return 'yellow'
+  if (score <= 75) return 'orange'
+  return 'red'
 }
 
 function asNumberOrNull(value) {
@@ -151,7 +188,68 @@ function formatTimeLeftToDeparture(value, nowTimestamp) {
   return `осталось: ${days} д ${hours} ч`
 }
 
-export default function DispatcherPage() {
+function formatRiskUpdatedAgo(value, nowTimestamp) {
+  const updatedAt = parseDateTime(value)
+  if (!updatedAt) return 'последнее обновление: нет данных'
+
+  const diffMs = Math.max(0, nowTimestamp - updatedAt.getTime())
+  const totalMinutes = Math.floor(diffMs / (1000 * 60))
+
+  if (totalMinutes < 1) return 'последнее обновление: только что'
+  if (totalMinutes < 60) return `последнее обновление: ${totalMinutes} мин назад`
+
+  const hours = Math.floor(totalMinutes / 60)
+  if (hours < 24) {
+    const minutes = totalMinutes % 60
+    if (minutes === 0) return `последнее обновление: ${hours} ч назад`
+    return `последнее обновление: ${hours} ч ${minutes} мин назад`
+  }
+
+  const days = Math.floor(hours / 24)
+  return `последнее обновление: ${days} д назад`
+}
+
+function toDateTimeLocalValue(value) {
+  const date = parseDateTime(value)
+  if (!date) return ''
+
+  const pad = (part) => String(part).padStart(2, '0')
+
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function mapFlightsById(flights) {
+  return Object.fromEntries(
+    (Array.isArray(flights) ? flights : [])
+      .filter((flight) => flight?.id)
+      .map((flight) => [flight.id, flight]),
+  )
+}
+
+function withRiskTimestamp(flight, knownById, fallbackTimestamp) {
+  const known = flight?.id ? knownById?.[flight.id] : null
+  const riskUpdatedAt =
+    flight?.riskUpdatedAt ??
+    flight?.cachedRiskUpdatedAt ??
+    known?.riskUpdatedAt ??
+    known?.cachedRiskUpdatedAt ??
+    fallbackTimestamp
+
+  return {
+    ...flight,
+    cachedRiskUpdatedAt: riskUpdatedAt,
+  }
+}
+
+function hydrateFlightsWithRiskTimestamps(flights, knownFlights = [], fallbackTimestamp = new Date().toISOString()) {
+  const knownById = mapFlightsById(knownFlights)
+  return (Array.isArray(flights) ? flights : []).map((flight) =>
+    withRiskTimestamp(flight, knownById, fallbackTimestamp),
+  )
+}
+
+export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'monitoring' }) {
+  const cachedFlightsOnLoad = useMemo(() => readFlightsCache(), [])
   const mapContainerRef = useRef(null)
   const mapRef = useRef(null)
   const airportLayerRef = useRef(null)
@@ -160,14 +258,21 @@ export default function DispatcherPage() {
 
   const [leafletReady, setLeafletReady] = useState(false)
   const [leafletError, setLeafletError] = useState('')
-  const [activeTab, setActiveTab] = useState('monitoring')
+  const [activeTab, setActiveTab] = useState(
+    initialTab === 'flights' ? initialTab : 'monitoring',
+  )
 
   const [form, setForm] = useState(createInitialForm)
 
   const [activeFlight, setActiveFlight] = useState(null)
-  const [allFlights, setAllFlights] = useState([])
-  const [isLoadingFlights, setIsLoadingFlights] = useState(true)
+  const [allFlights, setAllFlights] = useState(() =>
+    hydrateFlightsWithRiskTimestamps(cachedFlightsOnLoad, [], new Date().toISOString()),
+  )
+  const [isLoadingFlights, setIsLoadingFlights] = useState(() => cachedFlightsOnLoad.length === 0)
   const [flightsError, setFlightsError] = useState('')
+  const [flightActionError, setFlightActionError] = useState('')
+  const [flightActionById, setFlightActionById] = useState({})
+  const [flightToDelete, setFlightToDelete] = useState(null)
 
   const [selectedWeatherAirportId, setSelectedWeatherAirportId] = useState('')
   const [weatherByAirport, setWeatherByAirport] = useState({})
@@ -251,6 +356,10 @@ export default function DispatcherPage() {
   }, [weatherByAirport])
 
   useEffect(() => {
+    writeFlightsCache(allFlights)
+  }, [allFlights])
+
+  useEffect(() => {
     const intervalId = setInterval(() => {
       setTimeTick(Date.now())
     }, 60000)
@@ -264,11 +373,26 @@ export default function DispatcherPage() {
     fetchAllFlights()
       .then((flights) => {
         if (cancelled) return
-        setAllFlights(Array.isArray(flights) ? flights : [])
+        setFlightsError('')
+        setAllFlights((prev) =>
+          hydrateFlightsWithRiskTimestamps(
+            Array.isArray(flights) ? flights : [],
+            prev,
+            new Date().toISOString(),
+          ),
+        )
       })
-      .catch(() => {
+      .catch((cause) => {
         if (!cancelled) {
-          setFlightsError('Не удалось загрузить список рейсов с backend.')
+          const cachedFlights = readFlightsCache()
+          if (cachedFlights.length > 0) {
+            setAllFlights((prev) =>
+              hydrateFlightsWithRiskTimestamps(cachedFlights, prev, new Date().toISOString()),
+            )
+            setFlightsError('Backend недоступен. Показаны сохраненные рейсы из локального кэша.')
+          } else {
+            setFlightsError(cause instanceof Error ? cause.message : 'Не удалось загрузить список рейсов с backend.')
+          }
         }
       })
       .finally(() => {
@@ -299,7 +423,7 @@ export default function DispatcherPage() {
   }, [])
 
   useEffect(() => {
-    if (!leafletReady || !mapContainerRef.current || mapRef.current) return
+    if (!leafletReady || activeTab !== 'monitoring' || !mapContainerRef.current || mapRef.current) return
 
     const L = window.L
     const map = L.map(mapContainerRef.current, {
@@ -325,8 +449,10 @@ export default function DispatcherPage() {
     return () => {
       map.remove()
       mapRef.current = null
+      airportLayerRef.current = null
+      routeLayerRef.current = null
     }
-  }, [leafletReady])
+  }, [activeTab, leafletReady])
 
   const ensureWeather = useCallback(
     async (airportId) => {
@@ -514,8 +640,24 @@ export default function DispatcherPage() {
       return
     }
 
-    if (!form.departureAt || !form.flightNumber.trim()) {
+    if (!form.departureAt || !form.airlineCode || !form.flightDigits.trim()) {
       setError('Укажите дату/время вылета и номер рейса.')
+      return
+    }
+
+    if (!/^[A-Z]{2}$/.test(form.airlineCode)) {
+      setError('Код авиакомпании должен содержать 2 латинские буквы (IATA).')
+      return
+    }
+
+    if (!/^[1-9][0-9]{0,3}$/.test(form.flightDigits.trim())) {
+      setError('Цифровая часть номера рейса: 1-4 цифры без ведущего нуля.')
+      return
+    }
+
+    const departureDate = parseDateTime(form.departureAt)
+    if (!departureDate || departureDate.getTime() <= Date.now()) {
+      setError('Нельзя создать рейс в прошлом')
       return
     }
 
@@ -535,8 +677,10 @@ export default function DispatcherPage() {
         departureRisk.score * 0.4 + arrivalRisk.score * 0.4 + cruiseRisk.score * 0.2,
       )
 
+      const fullFlightNumber = `${form.airlineCode}${form.flightDigits.trim()}`
+
       const savedFlight = await createFlightApi({
-        flightNumber: form.flightNumber.trim().toUpperCase(),
+        flightNumber: fullFlightNumber,
         departureAt: form.departureAt,
         arrivalAt: null,
         fromAirportId: selectedFrom.id,
@@ -549,26 +693,20 @@ export default function DispatcherPage() {
       })
 
       setActiveFlight(savedFlight)
-      setAllFlights((prev) => [savedFlight, ...prev.filter((flight) => flight.id !== savedFlight.id)])
+      setAllFlights((prev) => {
+        const nowIso = new Date().toISOString()
+        const hydratedSaved = withRiskTimestamp(savedFlight, mapFlightsById(prev), nowIso)
+        return [hydratedSaved, ...prev.filter((flight) => flight.id !== savedFlight.id)]
+      })
       setSelectedWeatherAirportId(selectedFrom.id)
       setForm(createInitialForm())
       setActiveTab('monitoring')
-    } catch {
-      setError('Не удалось создать рейс. Проверьте backend и доступ к погодному API.')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Не удалось создать рейс. Проверьте backend и доступ к погодному API.')
     } finally {
       setIsEvaluating(false)
     }
   }
-
-  useEffect(() => {
-    if (!mapRef.current) return
-
-    const timer = setTimeout(() => {
-      mapRef.current?.invalidateSize()
-    }, 0)
-
-    return () => clearTimeout(timer)
-  }, [])
 
   const openFlightFromList = useCallback((flight) => {
     if (!flight) return
@@ -576,6 +714,107 @@ export default function DispatcherPage() {
     setSelectedWeatherAirportId(flight.fromAirportId)
     setActiveTab('monitoring')
   }, [])
+
+  const setFlightActionPending = useCallback((flightId, action, pending) => {
+    setFlightActionById((prev) => ({
+      ...prev,
+      [flightId]: {
+        ...(prev[flightId] ?? {}),
+        [action]: pending,
+      },
+    }))
+  }, [])
+
+  const handleRefreshRisk = useCallback(
+    async (flightId) => {
+      setFlightActionError('')
+      setFlightActionPending(flightId, 'refresh', true)
+
+      try {
+        const refreshedFlight = await refreshFlightRiskApi(flightId)
+        setAllFlights((prev) => {
+          const nowIso = new Date().toISOString()
+          const knownById = mapFlightsById(prev)
+          const nextFlight = withRiskTimestamp(refreshedFlight, knownById, nowIso)
+          return prev.map((flight) => (flight.id === nextFlight.id ? nextFlight : flight))
+        })
+        setActiveFlight((prev) => {
+          if (prev?.id !== refreshedFlight.id) return prev
+          return withRiskTimestamp(
+            refreshedFlight,
+            prev ? { [prev.id]: prev } : {},
+            new Date().toISOString(),
+          )
+        })
+      } catch (cause) {
+        setFlightActionError(
+          cause instanceof Error ? cause.message : 'Не удалось обновить риск по рейсу.',
+        )
+      } finally {
+        setFlightActionPending(flightId, 'refresh', false)
+      }
+    },
+    [setFlightActionPending],
+  )
+
+  const handleCancelFlight = useCallback(
+    async (flight) => {
+      if (!flight?.id) return
+
+      setFlightActionError('')
+      setFlightActionPending(flight.id, 'cancel', true)
+
+      try {
+        await cancelFlightApi(flight.id)
+
+        const flightsFromServer = await fetchAllFlights()
+        const nextFlights = hydrateFlightsWithRiskTimestamps(
+          Array.isArray(flightsFromServer) ? flightsFromServer : [],
+          allFlights,
+          new Date().toISOString(),
+        )
+        setAllFlights(nextFlights)
+
+        setActiveFlight((prev) => {
+          if (!prev?.id) return prev
+          return nextFlights.find((item) => item.id === prev.id) ?? null
+        })
+
+        setSelectedWeatherAirportId((prev) =>
+          prev && (prev === flight.fromAirportId || prev === flight.toAirportId) ? '' : prev,
+        )
+      } catch (cause) {
+        setFlightActionError(cause instanceof Error ? cause.message : 'Не удалось отменить рейс.')
+      } finally {
+        setFlightActionPending(flight.id, 'cancel', false)
+      }
+    },
+    [allFlights, setFlightActionPending],
+  )
+
+  const requestCancelFlight = useCallback((flight) => {
+    if (!flight?.id) return
+    setFlightToDelete(flight)
+  }, [])
+
+  const confirmCancelFlight = useCallback(() => {
+    if (!flightToDelete?.id) return
+    handleCancelFlight(flightToDelete)
+    setFlightToDelete(null)
+  }, [flightToDelete, handleCancelFlight])
+
+  useEffect(() => {
+    if (!flightToDelete) return
+
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        setFlightToDelete(null)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [flightToDelete])
 
   useEffect(() => {
     if (activeTab !== 'monitoring') return
@@ -586,341 +825,476 @@ export default function DispatcherPage() {
     return () => clearTimeout(timer)
   }, [activeTab])
 
+  const displayedRisk = activeRisk ?? previewRisk
+
   return (
-    <main className="dispatcher-app">
-      <section className="tabs-row panel">
-        <button
-          type="button"
-          className={`tab-btn ${activeTab === 'monitoring' ? 'active' : ''}`}
-          onClick={() => setActiveTab('monitoring')}
-        >
-          Мониторинг
-        </button>
-        <button
-          type="button"
-          className={`tab-btn ${activeTab === 'flights' ? 'active' : ''}`}
-          onClick={() => setActiveTab('flights')}
-        >
-          Рейсы
-        </button>
-      </section>
+    <Stack className="dispatcher-app" gap="md">
+      <Paper withBorder radius="xl" p="md" className="surface-card surface-card--tabs">
+        <Group justify="space-between" gap="md" wrap="wrap">
+          <Title order={3}>Панель диспетчера</Title>
+          <SegmentedControl
+            radius="xl"
+            size="md"
+            value={activeTab}
+            onChange={setActiveTab}
+            data={[
+              { value: 'monitoring', label: 'Мониторинг' },
+              { value: 'flights', label: 'Рейсы' },
+            ]}
+          />
+        </Group>
+      </Paper>
 
-      <section className={`content-grid ${activeTab === 'monitoring' ? '' : 'is-hidden'}`}>
-        <aside className="panel flight-creator">
-          <h2>Создание рейса</h2>
+      {activeTab === 'monitoring' && (
+        <Grid gutter="md">
+          <Grid.Col span={{ base: 12, xl: 4 }}>
+            <Paper withBorder radius="xl" p="lg" className="surface-card">
+              <Stack gap="md">
+                <Group justify="space-between" align="flex-start">
+                  <Title order={4}>Создание рейса</Title>
+                  <Badge variant="light" color="teal">
+                    live risk
+                  </Badge>
+                </Group>
 
-          <div className="form-grid">
-            <label className="route-field">
-              Город отправления
-              <select
-                value={form.fromCity}
-                onChange={(event) => {
-                  setActiveFlight(null)
-                  const city = event.target.value
-                  setForm((prev) => {
-                    const next = { ...prev, fromCity: city, fromAirportId: '' }
-                    const routeValidationError = validateRoute(next)
-                    setError(routeValidationError)
-                    return next
-                  })
-                }}
-              >
-                <option value="">Выберите город</option>
-                {cities.map((city) => (
-                  <option key={city} value={city} disabled={city === form.toCity}>
-                    {city}
-                  </option>
-                ))}
-              </select>
-            </label>
+                <div className="form-grid">
+                  <NativeSelect
+                    label="Город отправления"
+                    value={form.fromCity}
+                    onChange={(event) => {
+                      setActiveFlight(null)
+                      const city = event.target.value
+                      setForm((prev) => {
+                        const next = { ...prev, fromCity: city, fromAirportId: '' }
+                        const routeValidationError = validateRoute(next)
+                        setError(routeValidationError)
+                        return next
+                      })
+                    }}
+                  >
+                    <option value="">Выберите город</option>
+                    {cities.map((city) => (
+                      <option key={city} value={city}>
+                        {city}
+                      </option>
+                    ))}
+                  </NativeSelect>
 
-            <label className="route-field">
-              Город назначения
-              <select
-                value={form.toCity}
-                onChange={(event) => {
-                  setActiveFlight(null)
-                  const city = event.target.value
-                  setForm((prev) => {
-                    const next = { ...prev, toCity: city, toAirportId: '' }
-                    const routeValidationError = validateRoute(next)
-                    setError(routeValidationError)
-                    return next
-                  })
-                }}
-              >
-                <option value="">Выберите город</option>
-                {cities.map((city) => (
-                  <option key={city} value={city} disabled={city === form.fromCity}>
-                    {city}
-                  </option>
-                ))}
-              </select>
-            </label>
+                  <NativeSelect
+                    label="Город назначения"
+                    value={form.toCity}
+                    onChange={(event) => {
+                      setActiveFlight(null)
+                      const city = event.target.value
+                      setForm((prev) => {
+                        const next = { ...prev, toCity: city, toAirportId: '' }
+                        const routeValidationError = validateRoute(next)
+                        setError(routeValidationError)
+                        return next
+                      })
+                    }}
+                  >
+                    <option value="">Выберите город</option>
+                    {cities.map((city) => (
+                      <option key={city} value={city}>
+                        {city}
+                      </option>
+                    ))}
+                  </NativeSelect>
 
-            <label className="route-field">
-              Аэропорт отправления
-              <select
-                value={form.fromAirportId}
-                onChange={(event) => {
-                  setActiveFlight(null)
-                  const airportId = event.target.value
-                  setForm((prev) => {
-                    const next = { ...prev, fromAirportId: airportId }
-                    const routeValidationError = validateRoute(next)
-                    setError(routeValidationError)
-                    return next
-                  })
-                  if (airportId) openAirportWeather(airportId)
-                }}
-              >
-                <option value="">Выберите аэропорт</option>
-                {fromAirportOptions.map((airport) => (
-                  <option key={airport.id} value={airport.id} disabled={airport.id === form.toAirportId}>
-                    {airport.id} - {airport.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+                  <NativeSelect
+                    label="Аэропорт отправления"
+                    value={form.fromAirportId}
+                    onChange={(event) => {
+                      setActiveFlight(null)
+                      const airportId = event.target.value
+                      setForm((prev) => {
+                        const next = { ...prev, fromAirportId: airportId }
+                        const routeValidationError = validateRoute(next)
+                        setError(routeValidationError)
+                        return next
+                      })
+                      if (airportId) openAirportWeather(airportId)
+                    }}
+                  >
+                    <option value="">Выберите аэропорт</option>
+                    {fromAirportOptions.map((airport) => (
+                      <option key={airport.id} value={airport.id}>
+                        {airport.id} - {airport.name}
+                      </option>
+                    ))}
+                  </NativeSelect>
 
-            <label className="route-field">
-              Аэропорт назначения
-              <select
-                value={form.toAirportId}
-                onChange={(event) => {
-                  setActiveFlight(null)
-                  const airportId = event.target.value
-                  setForm((prev) => {
-                    const next = { ...prev, toAirportId: airportId }
-                    const routeValidationError = validateRoute(next)
-                    setError(routeValidationError)
-                    return next
-                  })
-                  if (airportId) openAirportWeather(airportId)
-                }}
-              >
-                <option value="">Выберите аэропорт</option>
-                {toAirportOptions.map((airport) => (
-                  <option key={airport.id} value={airport.id} disabled={airport.id === form.fromAirportId}>
-                    {airport.id} - {airport.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+                  <NativeSelect
+                    label="Аэропорт назначения"
+                    value={form.toAirportId}
+                    onChange={(event) => {
+                      setActiveFlight(null)
+                      const airportId = event.target.value
+                      setForm((prev) => {
+                        const next = { ...prev, toAirportId: airportId }
+                        const routeValidationError = validateRoute(next)
+                        setError(routeValidationError)
+                        return next
+                      })
+                      if (airportId) openAirportWeather(airportId)
+                    }}
+                  >
+                    <option value="">Выберите аэропорт</option>
+                    {toAirportOptions.map((airport) => (
+                      <option key={airport.id} value={airport.id}>
+                        {airport.id} - {airport.name}
+                      </option>
+                    ))}
+                  </NativeSelect>
 
-            <label>
-              Дата и время вылета
-              <input
-                type="datetime-local"
-                value={form.departureAt}
-                onChange={(event) => setForm((prev) => ({ ...prev, departureAt: event.target.value }))}
-              />
-            </label>
+                  <TextInput
+                    label="Дата и время вылета"
+                    type="datetime-local"
+                    value={form.departureAt}
+                    onChange={(event) => setForm((prev) => ({ ...prev, departureAt: event.target.value }))}
+                  />
 
-            <label>
-              Номер рейса
-              <input
-                type="text"
-                placeholder="SU123"
-                value={form.flightNumber}
-                onChange={(event) => setForm((prev) => ({ ...prev, flightNumber: event.target.value }))}
-              />
-            </label>
-          </div>
+                  <NativeSelect
+                    label="Код авиакомпании (IATA)"
+                    value={form.airlineCode}
+                    onChange={(event) =>
+                      setForm((prev) => ({ ...prev, airlineCode: event.target.value.toUpperCase() }))
+                    }
+                  >
+                    {AIRLINE_IATA_CODES.map((code) => (
+                      <option key={code} value={code}>
+                        {code}
+                      </option>
+                    ))}
+                  </NativeSelect>
 
-          <button type="button" className="primary-btn" onClick={createFlight} disabled={isEvaluating}>
-            {isEvaluating ? 'Расчет риска...' : 'Создать рейс'}
-          </button>
-
-          {error && <p className="inline-error">{error}</p>}
-        </aside>
-
-        <section className="panel monitoring-panel">
-          <h2>Результат мониторинга</h2>
-
-          <div className="map-stage">
-            <div className="risk-legend">
-              {RISK_LEGEND.map((item) => (
-                <div key={item.label} className="legend-item">
-                  <span className={`legend-dot ${item.className}`} />
-                  <span>{item.label}</span>
+                  <TextInput
+                    label="Цифры рейса"
+                    inputMode="numeric"
+                    placeholder="123"
+                    value={form.flightDigits}
+                    onChange={(event) => {
+                      const digits = event.target.value.replace(/\D/g, '').slice(0, 4)
+                      setForm((prev) => ({ ...prev, flightDigits: digits }))
+                    }}
+                  />
                 </div>
-              ))}
-            </div>
 
-            {leafletError && <p className="inline-error map-error">{leafletError}</p>}
-            <div ref={mapContainerRef} className="leaflet-map" />
-          </div>
+                <Button radius="xl" size="md" onClick={createFlight} loading={isEvaluating}>
+                  Создать рейс
+                </Button>
 
-          <section className="bottom-params">
-            <article className="weather-point-card">
-              <h3>Погода выбранной точки</h3>
-              {selectedWeatherAirport && selectedWeather ? (
-                <>
-                  <p>
-                    <strong>{selectedWeatherAirport.id}</strong> - {selectedWeatherAirport.name},{' '}
-                    {selectedWeatherAirport.city}
-                  </p>
-                  <div className="weather-grid">
-                    <div>
-                      <span>Описание</span>
-                      <strong>{selectedWeather.weather?.[0]?.description ?? 'нет данных'}</strong>
-                    </div>
-                    <div>
-                      <span>Температура</span>
-                      <strong>{formatFixedOrNA(selectedWeather.main?.temp)} C</strong>
-                    </div>
-                    <div>
-                      <span>Ощущается</span>
-                      <strong>{formatFixedOrNA(selectedWeather.main?.feels_like)} C</strong>
-                    </div>
-                    <div>
-                      <span>Ветер</span>
-                      <strong>{formatFixedOrNA(selectedWeather.wind?.speed)} м/с</strong>
-                    </div>
-                    <div>
-                      <span>Порывы</span>
-                      <strong>{formatFixedOrNA(selectedWeather.wind?.gust)} м/с</strong>
-                    </div>
-                    <div>
-                      <span>Видимость</span>
-                      <strong>{formatVisibilityKmOrNA(selectedWeather.visibility)} км</strong>
-                    </div>
-                    <div>
-                      <span>Давление</span>
-                      <strong>{formatIntOrNA(selectedWeather.main?.pressure)} гПа</strong>
-                    </div>
-                    <div>
-                      <span>Влажность</span>
-                      <strong>{formatIntOrNA(selectedWeather.main?.humidity)}%</strong>
-                    </div>
-                    <div>
-                      <span>Облачность</span>
-                      <strong>{formatIntOrNA(selectedWeather.clouds?.all)}%</strong>
-                    </div>
-                    <div>
-                      <span>Осадки</span>
-                      <strong>{formatFixedOrNA(getPrecipPerHour(selectedWeather))} мм/ч</strong>
-                    </div>
+                {error && (
+                  <Alert color="red" radius="md" icon={<IconAlertCircle size={18} />}>
+                    {error}
+                  </Alert>
+                )}
+              </Stack>
+            </Paper>
+          </Grid.Col>
+
+          <Grid.Col span={{ base: 12, xl: 8 }}>
+            <Paper withBorder radius="xl" p="lg" className="surface-card">
+              <Stack gap="md">
+                <Title order={4}>Результат мониторинга</Title>
+
+                <div className="map-stage">
+                  <div className="risk-legend">
+                    {RISK_LEGEND.map((item) => (
+                      <div key={item.label} className="legend-item">
+                        <span className={`legend-dot ${item.className}`} />
+                        <span>{item.label}</span>
+                      </div>
+                    ))}
                   </div>
-                </>
-              ) : (
-                <p className="muted">Нажмите на точку аэропорта на карте, чтобы увидеть параметры погоды.</p>
-              )}
-            </article>
 
-            <article className="weather-point-card">
-              <h3>Оценка риска по погоде</h3>
-              {activeRisk || previewRisk ? (
-                <div className="risk-block">
-                  {!activeRisk && previewRisk && (
-                    <p className="muted">Предварительная оценка до создания рейса.</p>
+                  {leafletError && (
+                    <Alert className="map-error" color="red" icon={<IconAlertCircle size={16} />}>
+                      {leafletError}
+                    </Alert>
                   )}
-                  <div className="risk-row">
-                    <span>Взлет</span>
-                    <strong>
-                      {(activeRisk ?? previewRisk).departure.score}/100 ({riskLevelLabel((activeRisk ?? previewRisk).departure.score)})
-                    </strong>
-                  </div>
-                  <div className="risk-track">
-                    <div
-                      className={`risk-fill ${getRiskClass((activeRisk ?? previewRisk).departure.score)}`}
-                      style={{ width: `${(activeRisk ?? previewRisk).departure.score}%` }}
-                    />
-                  </div>
-
-                  <div className="risk-row">
-                    <span>Посадка</span>
-                    <strong>
-                      {(activeRisk ?? previewRisk).arrival.score}/100 ({riskLevelLabel((activeRisk ?? previewRisk).arrival.score)})
-                    </strong>
-                  </div>
-                  <div className="risk-track">
-                    <div
-                      className={`risk-fill ${getRiskClass((activeRisk ?? previewRisk).arrival.score)}`}
-                      style={{ width: `${(activeRisk ?? previewRisk).arrival.score}%` }}
-                    />
-                  </div>
-
-                  <div className="risk-row">
-                    <span>Эшелон ~12 км</span>
-                    <strong>
-                      {(activeRisk ?? previewRisk).cruise.score}/100 ({riskLevelLabel((activeRisk ?? previewRisk).cruise.score)})
-                    </strong>
-                  </div>
-                  <div className="risk-track">
-                    <div
-                      className={`risk-fill ${getRiskClass((activeRisk ?? previewRisk).cruise.score)}`}
-                      style={{ width: `${(activeRisk ?? previewRisk).cruise.score}%` }}
-                    />
-                  </div>
-
-                  <div className="risk-row total">
-                    <span>Итоговый риск</span>
-                    <strong>
-                      {(activeRisk ?? previewRisk).total}/100 ({riskLevelLabel((activeRisk ?? previewRisk).total)})
-                    </strong>
-                  </div>
-                  <div className="risk-track">
-                    <div
-                      className={`risk-fill ${(activeRisk ?? previewRisk).feasibility.className}`}
-                      style={{ width: `${(activeRisk ?? previewRisk).total}%` }}
-                    />
-                  </div>
+                  <div ref={mapContainerRef} className="leaflet-map" />
                 </div>
-              ) : isPreviewEvaluating ? (
-                <p className="muted">Предварительный расчет риска...</p>
-              ) : (
-                <p className="muted">Создайте рейс, чтобы получить расчет риска по текущим погодным условиям.</p>
-              )}
-            </article>
-          </section>
-        </section>
-      </section>
+
+                <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
+                  <Card withBorder radius="lg" padding="md" className="surface-card surface-card--subtle">
+                    <Stack gap="sm">
+                      <Title order={5}>Погода выбранной точки</Title>
+                      {selectedWeatherAirport && selectedWeather ? (
+                        <>
+                          <Text fw={600}>
+                            {selectedWeatherAirport.id} - {selectedWeatherAirport.name},{' '}
+                            {selectedWeatherAirport.city}
+                          </Text>
+                          <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="xs">
+                            <Paper withBorder radius="md" p="xs" className="metric-tile">
+                              <Text size="xs" c="dimmed">Описание</Text>
+                              <Text fw={600}>{selectedWeather.weather?.[0]?.description ?? 'нет данных'}</Text>
+                            </Paper>
+                            <Paper withBorder radius="md" p="xs" className="metric-tile">
+                              <Text size="xs" c="dimmed">Температура</Text>
+                              <Text fw={600}>{formatFixedOrNA(selectedWeather.main?.temp)} °C</Text>
+                            </Paper>
+                            <Paper withBorder radius="md" p="xs" className="metric-tile">
+                              <Text size="xs" c="dimmed">Ощущается</Text>
+                              <Text fw={600}>{formatFixedOrNA(selectedWeather.main?.feels_like)} °C</Text>
+                            </Paper>
+                            <Paper withBorder radius="md" p="xs" className="metric-tile">
+                              <Text size="xs" c="dimmed">Ветер</Text>
+                              <Text fw={600}>{formatFixedOrNA(selectedWeather.wind?.speed)} м/с</Text>
+                            </Paper>
+                            <Paper withBorder radius="md" p="xs" className="metric-tile">
+                              <Text size="xs" c="dimmed">Порывы</Text>
+                              <Text fw={600}>{formatFixedOrNA(selectedWeather.wind?.gust)} м/с</Text>
+                            </Paper>
+                            <Paper withBorder radius="md" p="xs" className="metric-tile">
+                              <Text size="xs" c="dimmed">Видимость</Text>
+                              <Text fw={600}>{formatVisibilityKmOrNA(selectedWeather.visibility)} км</Text>
+                            </Paper>
+                            <Paper withBorder radius="md" p="xs" className="metric-tile">
+                              <Text size="xs" c="dimmed">Давление</Text>
+                              <Text fw={600}>{formatIntOrNA(selectedWeather.main?.pressure)} гПа</Text>
+                            </Paper>
+                            <Paper withBorder radius="md" p="xs" className="metric-tile">
+                              <Text size="xs" c="dimmed">Влажность</Text>
+                              <Text fw={600}>{formatIntOrNA(selectedWeather.main?.humidity)}%</Text>
+                            </Paper>
+                            <Paper withBorder radius="md" p="xs" className="metric-tile">
+                              <Text size="xs" c="dimmed">Облачность</Text>
+                              <Text fw={600}>{formatIntOrNA(selectedWeather.clouds?.all)}%</Text>
+                            </Paper>
+                            <Paper withBorder radius="md" p="xs" className="metric-tile">
+                              <Text size="xs" c="dimmed">Осадки</Text>
+                              <Text fw={600}>{formatFixedOrNA(getPrecipPerHour(selectedWeather))} мм/ч</Text>
+                            </Paper>
+                          </SimpleGrid>
+                        </>
+                      ) : (
+                        <Text c="dimmed">
+                          Нажмите на точку аэропорта на карте, чтобы увидеть параметры погоды.
+                        </Text>
+                      )}
+                    </Stack>
+                  </Card>
+
+                  <Card withBorder radius="lg" padding="md" className="surface-card surface-card--subtle">
+                    <Stack gap="sm">
+                      <Title order={5}>Оценка риска по погоде</Title>
+                      {displayedRisk ? (
+                        <>
+                          {!activeRisk && previewRisk && (
+                            <Text c="dimmed" size="sm">Предварительная оценка до создания рейса.</Text>
+                          )}
+
+                          <Group justify="space-between">
+                            <Text size="sm">Взлет</Text>
+                            <Text size="sm" fw={600}>
+                              {displayedRisk.departure.score}/100 ({riskLevelLabel(displayedRisk.departure.score)})
+                            </Text>
+                          </Group>
+                          <Progress value={displayedRisk.departure.score} color={getRiskColor(displayedRisk.departure.score)} />
+
+                          <Group justify="space-between">
+                            <Text size="sm">Посадка</Text>
+                            <Text size="sm" fw={600}>
+                              {displayedRisk.arrival.score}/100 ({riskLevelLabel(displayedRisk.arrival.score)})
+                            </Text>
+                          </Group>
+                          <Progress value={displayedRisk.arrival.score} color={getRiskColor(displayedRisk.arrival.score)} />
+
+                          <Group justify="space-between">
+                            <Text size="sm">Эшелон ~12 км</Text>
+                            <Text size="sm" fw={600}>
+                              {displayedRisk.cruise.score}/100 ({riskLevelLabel(displayedRisk.cruise.score)})
+                            </Text>
+                          </Group>
+                          <Progress value={displayedRisk.cruise.score} color={getRiskColor(displayedRisk.cruise.score)} />
+
+                          <Divider />
+                          <Group justify="space-between">
+                            <Text fw={700}>Итоговый риск</Text>
+                            <Text fw={700}>
+                              {displayedRisk.total}/100 ({riskLevelLabel(displayedRisk.total)})
+                            </Text>
+                          </Group>
+                          <Progress value={displayedRisk.total} color={getRiskColor(displayedRisk.total)} size="lg" radius="xl" />
+                        </>
+                      ) : isPreviewEvaluating ? (
+                        <Text c="dimmed">Предварительный расчет риска...</Text>
+                      ) : (
+                        <Text c="dimmed">
+                          Создайте рейс, чтобы получить расчет риска по текущим погодным условиям.
+                        </Text>
+                      )}
+                    </Stack>
+                  </Card>
+                </SimpleGrid>
+              </Stack>
+            </Paper>
+          </Grid.Col>
+        </Grid>
+      )}
 
       {activeTab === 'flights' && (
-      <section className="panel flights-panel">
-        <h2>Все рейсы</h2>
-        {isLoadingFlights ? (
-          <p className="muted">Загружаем рейсы...</p>
-        ) : allFlights.length === 0 ? (
-          <p className="muted">Пока нет созданных рейсов.</p>
-        ) : (
-          <div className="flights-table-wrap">
-            <table className="flights-table">
-              <thead>
-                <tr>
-                  <th>Рейс</th>
-                  <th>Маршрут</th>
-                  <th>Вылет</th>
-                  <th>Прилет</th>
-                  <th>Риск</th>
-                </tr>
-              </thead>
-              <tbody>
-                {allFlights.map((flight) => (
-                  <tr key={flight.id} onClick={() => openFlightFromList(flight)}>
-                    <td>{flight.flightNumber}</td>
-                    <td>
-                      {flight.fromAirportId} - {flight.toAirportId}
-                    </td>
-                    <td>
-                      <div className="departure-cell">
-                        <span>{formatDateTime(flight.departureAt)}</span>
-                        <span className="departure-remaining">{formatTimeLeftToDeparture(flight.departureAt, timeTick)}</span>
-                      </div>
-                    </td>
-                    <td>{formatDateTime(getFlightArrivalForTable(flight))}</td>
-                    <td>{safeNumber(flight.totalRisk, 0)}/100</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        {flightsError && <p className="inline-error">{flightsError}</p>}
-      </section>
+        <Paper withBorder radius="xl" p="lg" className="surface-card">
+          <Stack gap="md">
+            <Title order={4}>Все рейсы</Title>
+            {isLoadingFlights ? (
+              <Text c="dimmed">Загружаем рейсы...</Text>
+            ) : allFlights.length === 0 ? (
+              <Text c="dimmed">Пока нет созданных рейсов.</Text>
+            ) : (
+              <Box className="flights-table-wrap">
+                <Table highlightOnHover stickyHeader withTableBorder>
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>Рейс</Table.Th>
+                      <Table.Th>Маршрут</Table.Th>
+                      <Table.Th>Вылет</Table.Th>
+                      <Table.Th>Прилет</Table.Th>
+                      <Table.Th>Риск</Table.Th>
+                      <Table.Th>Действия</Table.Th>
+                    </Table.Tr>
+                  </Table.Thead>
+                  <Table.Tbody>
+                    {allFlights.map((flight) => {
+                      const estimatedArrivalAt = getFlightArrivalForTable(flight)
+                      const riskScore = asNumberOrNull(flight.totalRisk)
+                      const riskUpdatedAt =
+                        flight?.riskUpdatedAt ?? flight?.cachedRiskUpdatedAt ?? flight?.createdAt ?? null
+                      const actionState = flightActionById[flight.id] ?? {}
+                      const isRefreshing = Boolean(actionState.refresh)
+                      const isCancelling = Boolean(actionState.cancel)
+                      const isActionPending = isRefreshing || isCancelling
+
+                      return (
+                        <Table.Tr
+                          key={flight.id}
+                          className="flight-row"
+                          onClick={() => openFlightFromList(flight)}
+                        >
+                          <Table.Td>{flight.flightNumber}</Table.Td>
+                          <Table.Td>
+                            {flight.fromAirportId} - {flight.toAirportId}
+                          </Table.Td>
+                          <Table.Td>
+                            <Stack gap={2}>
+                              <Text size="sm">{formatDateTime(flight.departureAt)}</Text>
+                              <Text size="xs" c="dimmed">
+                                {formatTimeLeftToDeparture(flight.departureAt, timeTick)}
+                              </Text>
+                            </Stack>
+                          </Table.Td>
+                          <Table.Td>{formatDateTime(estimatedArrivalAt)}</Table.Td>
+                          <Table.Td>
+                            <Stack gap={2}>
+                              <Group gap={8} align="center">
+                                <Badge variant="dot" color={getRiskColor(riskScore ?? 0)}>
+                                  {riskScore == null ? 'нет данных' : `${riskScore}/100`}
+                                </Badge>
+                              </Group>
+                              <Text size="xs" c="dimmed">
+                                {formatRiskUpdatedAgo(riskUpdatedAt, timeTick)}
+                              </Text>
+                            </Stack>
+                          </Table.Td>
+                          <Table.Td>
+                            <Group gap="xs" wrap="nowrap" className="flight-actions">
+                              <Button
+                                variant="light"
+                                color="yellow"
+                                radius="xl"
+                                size="xs"
+                                leftSection={<IconMessageCircle size={14} />}
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  onRequestMeteorologist?.({
+                                    flightNumber: flight.flightNumber ?? '',
+                                    fromAirportId: flight.fromAirportId ?? '',
+                                    toAirportId: flight.toAirportId ?? '',
+                                    etd: toDateTimeLocalValue(flight.departureAt),
+                                    eta: toDateTimeLocalValue(estimatedArrivalAt),
+                                  })
+                                }}
+                                disabled={isActionPending}
+                              >
+                                Метеоролог
+                              </Button>
+                              <ActionIcon
+                                variant="subtle"
+                                color="blue"
+                                size="lg"
+                                radius="xl"
+                                title="Обновить риск"
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  handleRefreshRisk(flight.id)
+                                }}
+                                disabled={isActionPending}
+                              >
+                                <IconRefresh size={16} />
+                              </ActionIcon>
+                              <ActionIcon
+                                variant="subtle"
+                                color="red"
+                                size="lg"
+                                radius="xl"
+                                title="Отменить рейс"
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  requestCancelFlight(flight)
+                                }}
+                                disabled={isActionPending}
+                              >
+                                <IconTrash size={16} />
+                              </ActionIcon>
+                            </Group>
+                          </Table.Td>
+                        </Table.Tr>
+                      )
+                    })}
+                  </Table.Tbody>
+                </Table>
+              </Box>
+            )}
+
+            {flightsError && (
+              <Alert color="red" radius="md" icon={<IconAlertCircle size={18} />}>
+                {flightsError}
+              </Alert>
+            )}
+            {flightActionError && (
+              <Alert color="red" radius="md" icon={<IconAlertCircle size={18} />}>
+                {flightActionError}
+              </Alert>
+            )}
+          </Stack>
+        </Paper>
       )}
-    </main>
+
+      <Modal
+        opened={Boolean(flightToDelete)}
+        onClose={() => setFlightToDelete(null)}
+        centered
+        radius="xl"
+        title="Подтверждение удаления"
+      >
+        <Stack gap="md">
+          <Text>
+            Удалить рейс <strong>{flightToDelete?.flightNumber}</strong> ({flightToDelete?.fromAirportId} -{' '}
+            {flightToDelete?.toAirportId})?
+          </Text>
+          <Group justify="flex-end">
+            <Button variant="default" radius="xl" onClick={() => setFlightToDelete(null)}>
+              Нет
+            </Button>
+            <Button color="red" radius="xl" onClick={confirmCancelFlight}>
+              Да, удалить
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+    </Stack>
   )
 }
