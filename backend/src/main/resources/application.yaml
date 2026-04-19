@@ -1,11 +1,11 @@
 server:
-  port: 8080
+  port: ${SERVER_PORT:8080}
 
 spring:
   datasource:
-    url: jdbc:postgresql://localhost:5432/diplom_bd
-    username: postgres
-    password: 147855
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:diplom_bd}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:147855}
     driver-class-name: org.postgresql.Driver
   jpa:
     hibernate:
@@ -19,8 +19,10 @@ spring:
 
 app:
   weather:
-    base-url: https://api.openweathermap.org/data/2.5/weather
-    api-key: 543bce10e8f27c6f0e76565fb383e083
-    ttl-ms: 600000
+    base-url: ${WEATHER_BASE_URL:https://api.openweathermap.org/data/2.5/weather}
+    api-key: ${WEATHER_API_KEY:9b4cc0948dcc520972385870ae821c24}
+    ttl-ms: ${WEATHER_TTL_MS:600000}
+  risk-refresh:
+    tick-ms: ${RISK_REFRESH_TICK_MS:3600000}
   cors:
-    allowed-origins: http://localhost:5173
+    allowed-origins: ${APP_CORS_ALLOWED_ORIGINS:http://localhost:5173}

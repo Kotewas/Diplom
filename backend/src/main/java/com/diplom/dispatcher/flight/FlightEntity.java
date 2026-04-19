@@ -61,6 +61,9 @@ public class FlightEntity {
     @Column(nullable = false)
     private String feasibilityClassName;
 
+    @Column
+    private Instant riskUpdatedAt;
+
     public String getId() {
         return id;
     }
@@ -187,5 +190,13 @@ public class FlightEntity {
 
     public void setFeasibilityClassName(String feasibilityClassName) {
         this.feasibilityClassName = feasibilityClassName;
+    }
+
+    public Instant getRiskUpdatedAt() {
+        return riskUpdatedAt;
+    }
+
+    public void setRiskUpdatedAt(Instant riskUpdatedAt) {
+        this.riskUpdatedAt = riskUpdatedAt;
     }
 }
