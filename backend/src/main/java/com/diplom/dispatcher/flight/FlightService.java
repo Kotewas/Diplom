@@ -25,10 +25,18 @@ public class FlightService {
     private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {
     };
     private static final double EARTH_RADIUS_KM = 6371.0;
-    private static final double AVERAGE_CRUISE_SPEED_KMH = 820.0;
-    private static final long AIRPORT_OPERATIONS_MINUTES = 25;
-    private static final long MIN_TOTAL_FLIGHT_MINUTES = 35;
-    private static final Pattern FLIGHT_NUMBER_PATTERN = Pattern.compile("^[A-Z]{2}[1-9][0-9]{0,3}$");
+    private static final String AIRCRAFT_TYPE_AIRPLANE = "AIRPLANE";
+    private static final String AIRCRAFT_TYPE_HELICOPTER = "HELICOPTER";
+    private static final double AIRPLANE_CRUISE_SPEED_KMH = 820.0;
+    private static final long AIRPLANE_OPERATIONS_MINUTES = 25;
+    private static final long AIRPLANE_MIN_TOTAL_FLIGHT_MINUTES = 35;
+    private static final double HELICOPTER_CRUISE_SPEED_KMH = 220.0;
+    private static final long HELICOPTER_OPERATIONS_MINUTES = 12;
+    private static final long HELICOPTER_MIN_TOTAL_FLIGHT_MINUTES = 18;
+    private static final Pattern AIRPLANE_FLIGHT_NUMBER_PATTERN = Pattern.compile("^[A-Z]{2}[1-9][0-9]{0,3}$");
+    private static final Pattern HELICOPTER_FLIGHT_NUMBER_PATTERN = Pattern.compile("^H[1-9][0-9]{0,3}$");
+    private static final int MIN_DELAY_MINUTES = 5;
+    private static final int MAX_DELAY_MINUTES = 360;
 
     private final FlightRepository flightRepository;
     private final AirportCatalogService airportCatalogService;
@@ -59,12 +67,14 @@ public class FlightService {
         validateRequest(request);
 
         Instant now = Instant.now();
+        String aircraftType = resolveAircraftType(request.aircraftType());
         String normalizedFlightNumber = normalizeFlightNumber(request.flightNumber());
 
         FlightEntity entity = new FlightEntity();
         entity.setId(generateFlightId());
         entity.setCreatedAt(now);
         entity.setFlightNumber(normalizedFlightNumber);
+        entity.setAircraftType(aircraftType);
         entity.setDepartureAt(request.departureAt());
         entity.setArrivalAt(resolveArrivalAt(request));
         entity.setFromAirportId(request.fromAirportId());
@@ -82,6 +92,7 @@ public class FlightService {
         entity.setFeasibilityLabel(request.feasibility().label());
         entity.setFeasibilityClassName(request.feasibility().className());
         entity.setRiskUpdatedAt(now);
+        entity.setDispatcherDecision(DispatcherDecision.PENDING);
 
         FlightEntity saved = flightRepository.save(entity);
         return toDto(saved);
@@ -92,6 +103,104 @@ public class FlightService {
         recalculateRisk(flight, Instant.now());
         FlightEntity saved = flightRepository.save(flight);
         return toDto(saved);
+    }
+
+    public FlightDto applyDispatcherDecision(String flightId, ApplyDecisionRequest request) {
+        FlightEntity flight = findFlightOrThrow(flightId);
+
+        DispatcherDecision decision = resolveDispatcherDecision(request.decision());
+        if (decision == DispatcherDecision.PENDING) {
+            throw new IllegalArgumentException("Решение PENDING нельзя применить вручную");
+        }
+
+        String reason = request.reason() == null ? "" : request.reason().trim();
+        if (reason.isBlank()) {
+            throw new IllegalArgumentException("Укажите объяснение решения диспетчера");
+        }
+
+        Instant now = Instant.now();
+
+        if (decision == DispatcherDecision.DELAY) {
+            int delayMinutes = validateDelayMinutes(request.delayMinutes());
+            flight.setDepartureAt(flight.getDepartureAt().plusMinutes(delayMinutes));
+            if (flight.getArrivalAt() != null) {
+                flight.setArrivalAt(flight.getArrivalAt().plusMinutes(delayMinutes));
+            }
+            flight.setDispatcherDecisionDelayMinutes(delayMinutes);
+            recalculateRisk(flight, now);
+        } else {
+            flight.setDispatcherDecisionDelayMinutes(null);
+            if (decision == DispatcherDecision.APPROVE) {
+                recalculateRisk(flight, now);
+            }
+        }
+
+        flight.setDispatcherDecision(decision);
+        flight.setDispatcherDecisionReason(reason);
+        flight.setDispatcherDecisionAt(now);
+
+        FlightEntity saved = flightRepository.save(flight);
+        return toDto(saved);
+    }
+
+    public WhatIfDelayResponse simulateDelay(String flightId, int delayMinutes) {
+        FlightEntity flight = findFlightOrThrow(flightId);
+        int safeDelay = validateDelayMinutes(delayMinutes);
+
+        AirportDto fromAirport = airportCatalogService.getById(flight.getFromAirportId())
+                .orElseThrow(() -> new IllegalArgumentException("Airport is not found: " + flight.getFromAirportId()));
+        AirportDto toAirport = airportCatalogService.getById(flight.getToAirportId())
+                .orElseThrow(() -> new IllegalArgumentException("Airport is not found: " + flight.getToAirportId()));
+
+        JsonNode depWeather = weatherService.getWeatherByAirportId(flight.getFromAirportId());
+        JsonNode arrWeather = weatherService.getWeatherByAirportId(flight.getToAirportId());
+
+        FlightRiskDto departureRisk = evaluateSurfaceRisk(depWeather);
+        FlightRiskDto arrivalRisk = evaluateSurfaceRisk(arrWeather);
+        FlightRiskDto cruiseRisk = evaluateCruiseRisk(fromAirport, toAirport, depWeather, arrWeather);
+        int currentRisk = clampScore(
+                departureRisk.score() * 0.4
+                        + arrivalRisk.score() * 0.4
+                        + cruiseRisk.score() * 0.2
+        );
+
+        int simulatedRisk = adjustRiskForDelay(currentRisk, safeDelay, depWeather, arrWeather);
+        LocalDateTime currentDeparture = flight.getDepartureAt();
+        LocalDateTime currentArrival = flight.getArrivalAt() != null
+                ? flight.getArrivalAt()
+                : estimateArrivalAt(
+                        flight.getDepartureAt(),
+                        flight.getFromAirportId(),
+                        flight.getToAirportId(),
+                        resolveAircraftType(flight.getAircraftType())
+                );
+        LocalDateTime simulatedDeparture = currentDeparture == null ? null : currentDeparture.plusMinutes(safeDelay);
+        LocalDateTime simulatedArrival = currentArrival == null ? null : currentArrival.plusMinutes(safeDelay);
+        int delta = simulatedRisk - currentRisk;
+
+        String recommendation;
+        if (delta <= -10) {
+            recommendation = "Задержка существенно снижает риск";
+        } else if (delta <= -4) {
+            recommendation = "Задержка умеренно снижает риск";
+        } else if (delta < 4) {
+            recommendation = "Задержка почти не меняет уровень риска";
+        } else {
+            recommendation = "Задержка повышает риск, рекомендуется повторная проверка";
+        }
+
+        return new WhatIfDelayResponse(
+                currentRisk,
+                simulatedRisk,
+                delta,
+                currentDeparture,
+                simulatedDeparture,
+                currentArrival,
+                simulatedArrival,
+                getFeasibility(currentRisk),
+                getFeasibility(simulatedRisk),
+                recommendation
+        );
     }
 
     @Transactional
@@ -208,7 +317,12 @@ public class FlightService {
         flight.setFeasibilityClassName(feasibility.className());
 
         if (flight.getArrivalAt() == null) {
-            flight.setArrivalAt(estimateArrivalAt(flight.getDepartureAt(), flight.getFromAirportId(), flight.getToAirportId()));
+            flight.setArrivalAt(estimateArrivalAt(
+                    flight.getDepartureAt(),
+                    flight.getFromAirportId(),
+                    flight.getToAirportId(),
+                    resolveAircraftType(flight.getAircraftType())
+            ));
         }
 
         flight.setRiskUpdatedAt(now);
@@ -401,8 +515,15 @@ public class FlightService {
             throw new IllegalArgumentException("Вылет должен быть раньше прилета");
         }
 
+        String aircraftType = resolveAircraftType(request.aircraftType());
         String normalizedFlightNumber = normalizeFlightNumber(request.flightNumber());
-        if (!FLIGHT_NUMBER_PATTERN.matcher(normalizedFlightNumber).matches()) {
+        boolean isValidNumber = AIRCRAFT_TYPE_HELICOPTER.equals(aircraftType)
+                ? HELICOPTER_FLIGHT_NUMBER_PATTERN.matcher(normalizedFlightNumber).matches()
+                : AIRPLANE_FLIGHT_NUMBER_PATTERN.matcher(normalizedFlightNumber).matches();
+        if (!isValidNumber) {
+            if (AIRCRAFT_TYPE_HELICOPTER.equals(aircraftType)) {
+                throw new IllegalArgumentException("Номер вертолета должен быть в формате H и 1-4 цифры без ведущего нуля (пример: H123)");
+            }
             throw new IllegalArgumentException("Номер рейса должен быть в формате IATA: 2 буквы и 1-4 цифры без ведущего нуля (пример: SU123)");
         }
 
@@ -431,6 +552,76 @@ public class FlightService {
         return flightNumber == null ? "" : flightNumber.trim().toUpperCase();
     }
 
+    private DispatcherDecision resolveDispatcherDecision(String rawDecision) {
+        if (rawDecision == null || rawDecision.isBlank()) {
+            return DispatcherDecision.PENDING;
+        }
+        try {
+            return DispatcherDecision.valueOf(rawDecision.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalArgumentException("Неизвестный тип решения диспетчера: " + rawDecision);
+        }
+    }
+
+    private int validateDelayMinutes(Integer delayMinutes) {
+        if (delayMinutes == null) {
+            throw new IllegalArgumentException("Укажите величину задержки в минутах");
+        }
+        if (delayMinutes < MIN_DELAY_MINUTES || delayMinutes > MAX_DELAY_MINUTES) {
+            throw new IllegalArgumentException("Задержка должна быть в диапазоне 5-360 минут");
+        }
+        if (delayMinutes % 5 != 0) {
+            throw new IllegalArgumentException("Задержка должна быть кратна 5 минутам");
+        }
+        return delayMinutes;
+    }
+
+    private int adjustRiskForDelay(int currentRisk, int delayMinutes, JsonNode depWeather, JsonNode arrWeather) {
+        double depWind = safeNumber(depWeather.path("wind").path("speed"), 0);
+        double arrWind = safeNumber(arrWeather.path("wind").path("speed"), 0);
+        double depGust = safeNumber(depWeather.path("wind").path("gust"), depWind);
+        double arrGust = safeNumber(arrWeather.path("wind").path("gust"), arrWind);
+        double depPrecip = Math.max(
+                safeNumber(depWeather.path("rain").path("1h"), 0),
+                safeNumber(depWeather.path("snow").path("1h"), 0)
+        );
+        double arrPrecip = Math.max(
+                safeNumber(arrWeather.path("rain").path("1h"), 0),
+                safeNumber(arrWeather.path("snow").path("1h"), 0)
+        );
+        int depCode = (int) safeNumber(depWeather.path("weather").path(0).path("id"), 800);
+        int arrCode = (int) safeNumber(arrWeather.path("weather").path(0).path("id"), 800);
+
+        int dangerSignals = 0;
+        if (depCode >= 200 && depCode < 300) dangerSignals += 3;
+        if (arrCode >= 200 && arrCode < 300) dangerSignals += 3;
+        if (depWind >= 15 || arrWind >= 15) dangerSignals += 2;
+        if (depGust >= 20 || arrGust >= 20) dangerSignals += 2;
+        if (depPrecip >= 2 || arrPrecip >= 2) dangerSignals += 2;
+        if (depCode == 741 || depCode == 701 || arrCode == 741 || arrCode == 701) dangerSignals += 1;
+
+        double baseEffect = Math.min(24, delayMinutes * 0.22);
+        double reductionMultiplier = 0.25 + (dangerSignals * 0.18);
+
+        int adjustedRisk;
+        if (dangerSignals == 0 && currentRisk < 45) {
+            adjustedRisk = clampScore(currentRisk + Math.min(5, delayMinutes * 0.05));
+        } else {
+            adjustedRisk = clampScore(currentRisk - baseEffect * reductionMultiplier);
+        }
+
+        return adjustedRisk;
+    }
+
+    private String resolveAircraftType(String aircraftTypeRaw) {
+        if (aircraftTypeRaw == null || aircraftTypeRaw.isBlank()) {
+            return AIRCRAFT_TYPE_AIRPLANE;
+        }
+        return AIRCRAFT_TYPE_HELICOPTER.equalsIgnoreCase(aircraftTypeRaw)
+                ? AIRCRAFT_TYPE_HELICOPTER
+                : AIRCRAFT_TYPE_AIRPLANE;
+    }
+
     private String generateFlightId() {
         return "flight_" + Instant.now().toEpochMilli() + "_" + UUID.randomUUID().toString().substring(0, 8);
     }
@@ -438,12 +629,18 @@ public class FlightService {
     private FlightDto toDto(FlightEntity entity) {
         LocalDateTime arrivalAt = entity.getArrivalAt() != null
                 ? entity.getArrivalAt()
-                : estimateArrivalAt(entity.getDepartureAt(), entity.getFromAirportId(), entity.getToAirportId());
+                : estimateArrivalAt(
+                entity.getDepartureAt(),
+                entity.getFromAirportId(),
+                entity.getToAirportId(),
+                resolveAircraftType(entity.getAircraftType())
+        );
 
         return new FlightDto(
                 entity.getId(),
                 entity.getCreatedAt(),
                 entity.getFlightNumber(),
+                resolveAircraftType(entity.getAircraftType()),
                 entity.getDepartureAt(),
                 arrivalAt,
                 entity.getFromAirportId(),
@@ -452,7 +649,12 @@ public class FlightService {
                 new FlightRiskDto(entity.getArrivalRiskScore(), fromJson(entity.getArrivalRiskFactors())),
                 new FlightRiskDto(entity.getCruiseRiskScore(), fromJson(entity.getCruiseRiskFactors())),
                 entity.getTotalRisk(),
-                new FeasibilityDto(entity.getFeasibilityLabel(), entity.getFeasibilityClassName())
+                new FeasibilityDto(entity.getFeasibilityLabel(), entity.getFeasibilityClassName()),
+                entity.getRiskUpdatedAt(),
+                (entity.getDispatcherDecision() == null ? DispatcherDecision.PENDING : entity.getDispatcherDecision()).name(),
+                entity.getDispatcherDecisionReason(),
+                entity.getDispatcherDecisionAt(),
+                entity.getDispatcherDecisionDelayMinutes()
         );
     }
 
@@ -479,10 +681,20 @@ public class FlightService {
         if (request.arrivalAt() != null) {
             return request.arrivalAt();
         }
-        return estimateArrivalAt(request.departureAt(), request.fromAirportId(), request.toAirportId());
+        return estimateArrivalAt(
+                request.departureAt(),
+                request.fromAirportId(),
+                request.toAirportId(),
+                resolveAircraftType(request.aircraftType())
+        );
     }
 
-    private LocalDateTime estimateArrivalAt(LocalDateTime departureAt, String fromAirportId, String toAirportId) {
+    private LocalDateTime estimateArrivalAt(
+            LocalDateTime departureAt,
+            String fromAirportId,
+            String toAirportId,
+            String aircraftType
+    ) {
         if (departureAt == null || fromAirportId == null || toAirportId == null) {
             return null;
         }
@@ -493,9 +705,14 @@ public class FlightService {
             return null;
         }
 
+        boolean helicopter = AIRCRAFT_TYPE_HELICOPTER.equals(resolveAircraftType(aircraftType));
+        double cruiseSpeed = helicopter ? HELICOPTER_CRUISE_SPEED_KMH : AIRPLANE_CRUISE_SPEED_KMH;
+        long operationsMinutes = helicopter ? HELICOPTER_OPERATIONS_MINUTES : AIRPLANE_OPERATIONS_MINUTES;
+        long minTotalMinutes = helicopter ? HELICOPTER_MIN_TOTAL_FLIGHT_MINUTES : AIRPLANE_MIN_TOTAL_FLIGHT_MINUTES;
+
         double distanceKm = haversineDistanceKm(fromAirport.lat(), fromAirport.lon(), toAirport.lat(), toAirport.lon());
-        long enrouteMinutes = Math.round((distanceKm / AVERAGE_CRUISE_SPEED_KMH) * 60.0);
-        long totalMinutes = Math.max(MIN_TOTAL_FLIGHT_MINUTES, enrouteMinutes + AIRPORT_OPERATIONS_MINUTES);
+        long enrouteMinutes = Math.round((distanceKm / cruiseSpeed) * 60.0);
+        long totalMinutes = Math.max(minTotalMinutes, enrouteMinutes + operationsMinutes);
         return departureAt.plusMinutes(totalMinutes);
     }
 

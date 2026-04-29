@@ -175,8 +175,7 @@ function App() {
 
     return (
       <Stack gap="md">
-        <Group justify="space-between" wrap="wrap">
-          <Title order={3}>Роль: диспетчер</Title>
+        <Group justify="flex-end" wrap="wrap">
           <Button variant="default" radius="xl" onClick={handleResetRole}>
             Сменить роль
           </Button>
@@ -193,8 +192,7 @@ function App() {
 
   return (
     <Stack gap="md">
-      <Group justify="space-between" wrap="wrap">
-        <Title order={3}>Роль: диспетчер</Title>
+      <Group justify="flex-end" wrap="wrap">
         <Button variant="default" radius="xl" onClick={handleResetRole}>
           Сменить роль
         </Button>

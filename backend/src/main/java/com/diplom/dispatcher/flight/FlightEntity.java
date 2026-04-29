@@ -2,6 +2,8 @@ package com.diplom.dispatcher.flight;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
@@ -21,6 +23,9 @@ public class FlightEntity {
 
     @Column(nullable = false)
     private String flightNumber;
+
+    @Column
+    private String aircraftType;
 
     @Column(nullable = false)
     private LocalDateTime departureAt;
@@ -64,6 +69,19 @@ public class FlightEntity {
     @Column
     private Instant riskUpdatedAt;
 
+    @Enumerated(EnumType.STRING)
+    @Column
+    private DispatcherDecision dispatcherDecision;
+
+    @Column(columnDefinition = "TEXT")
+    private String dispatcherDecisionReason;
+
+    @Column
+    private Instant dispatcherDecisionAt;
+
+    @Column
+    private Integer dispatcherDecisionDelayMinutes;
+
     public String getId() {
         return id;
     }
@@ -86,6 +104,14 @@ public class FlightEntity {
 
     public void setFlightNumber(String flightNumber) {
         this.flightNumber = flightNumber;
+    }
+
+    public String getAircraftType() {
+        return aircraftType;
+    }
+
+    public void setAircraftType(String aircraftType) {
+        this.aircraftType = aircraftType;
     }
 
     public LocalDateTime getDepartureAt() {
@@ -198,5 +224,37 @@ public class FlightEntity {
 
     public void setRiskUpdatedAt(Instant riskUpdatedAt) {
         this.riskUpdatedAt = riskUpdatedAt;
+    }
+
+    public DispatcherDecision getDispatcherDecision() {
+        return dispatcherDecision;
+    }
+
+    public void setDispatcherDecision(DispatcherDecision dispatcherDecision) {
+        this.dispatcherDecision = dispatcherDecision;
+    }
+
+    public String getDispatcherDecisionReason() {
+        return dispatcherDecisionReason;
+    }
+
+    public void setDispatcherDecisionReason(String dispatcherDecisionReason) {
+        this.dispatcherDecisionReason = dispatcherDecisionReason;
+    }
+
+    public Instant getDispatcherDecisionAt() {
+        return dispatcherDecisionAt;
+    }
+
+    public void setDispatcherDecisionAt(Instant dispatcherDecisionAt) {
+        this.dispatcherDecisionAt = dispatcherDecisionAt;
+    }
+
+    public Integer getDispatcherDecisionDelayMinutes() {
+        return dispatcherDecisionDelayMinutes;
+    }
+
+    public void setDispatcherDecisionDelayMinutes(Integer dispatcherDecisionDelayMinutes) {
+        this.dispatcherDecisionDelayMinutes = dispatcherDecisionDelayMinutes;
     }
 }

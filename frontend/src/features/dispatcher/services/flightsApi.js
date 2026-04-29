@@ -1,4 +1,5 @@
 import { API_BASE_URL } from '../model/constants'
+import { fetchWithTimeout } from './httpClient'
 
 async function extractErrorMessage(response, fallback) {
   try {
@@ -13,7 +14,7 @@ async function extractErrorMessage(response, fallback) {
 }
 
 export async function fetchAllFlights() {
-  const response = await fetch(`${API_BASE_URL}/api/flights`)
+  const response = await fetchWithTimeout(`${API_BASE_URL}/api/flights`)
   if (!response.ok) {
     const message = await extractErrorMessage(response, `Flights HTTP ${response.status}`)
     throw new Error(message)
@@ -23,7 +24,7 @@ export async function fetchAllFlights() {
 }
 
 export async function createFlight(payload) {
-  const response = await fetch(`${API_BASE_URL}/api/flights`, {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/api/flights`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -40,7 +41,7 @@ export async function createFlight(payload) {
 }
 
 export async function refreshFlightRisk(flightId) {
-  const response = await fetch(`${API_BASE_URL}/api/flights/${flightId}/refresh-risk`, {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/api/flights/${flightId}/refresh-risk`, {
     method: 'POST',
   })
 
@@ -53,7 +54,7 @@ export async function refreshFlightRisk(flightId) {
 }
 
 export async function cancelFlight(flightId) {
-  const response = await fetch(`${API_BASE_URL}/api/flights/${flightId}`, {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/api/flights/${flightId}`, {
     method: 'DELETE',
   })
 
@@ -61,4 +62,34 @@ export async function cancelFlight(flightId) {
     const message = await extractErrorMessage(response, `Cancel flight HTTP ${response.status}`)
     throw new Error(message)
   }
+}
+
+export async function applyFlightDecision(flightId, payload) {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/api/flights/${flightId}/decision`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
+
+  if (!response.ok) {
+    const message = await extractErrorMessage(response, `Decision HTTP ${response.status}`)
+    throw new Error(message)
+  }
+
+  return response.json()
+}
+
+export async function simulateFlightDelayWhatIf(flightId, delayMinutes) {
+  const response = await fetchWithTimeout(
+    `${API_BASE_URL}/api/flights/${flightId}/what-if-delay?minutes=${encodeURIComponent(delayMinutes)}`,
+  )
+
+  if (!response.ok) {
+    const message = await extractErrorMessage(response, `What-if HTTP ${response.status}`)
+    throw new Error(message)
+  }
+
+  return response.json()
 }

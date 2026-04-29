@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.bind.annotation.ResponseStatus;
 
@@ -36,6 +37,19 @@ public class FlightController {
     @PostMapping("/{flightId}/refresh-risk")
     public FlightDto refreshRisk(@PathVariable String flightId) {
         return flightService.refreshRiskNow(flightId);
+    }
+
+    @PostMapping("/{flightId}/decision")
+    public FlightDto applyDecision(@PathVariable String flightId, @Valid @RequestBody ApplyDecisionRequest request) {
+        return flightService.applyDispatcherDecision(flightId, request);
+    }
+
+    @GetMapping("/{flightId}/what-if-delay")
+    public WhatIfDelayResponse simulateDelay(
+            @PathVariable String flightId,
+            @RequestParam("minutes") int delayMinutes
+    ) {
+        return flightService.simulateDelay(flightId, delayMinutes);
     }
 
     @DeleteMapping("/{flightId}")

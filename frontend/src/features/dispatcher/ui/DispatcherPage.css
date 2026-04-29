@@ -23,6 +23,14 @@
   gap: 12px;
 }
 
+.form-grid .mantine-InputWrapper-label {
+  line-height: 1.2;
+}
+
+.form-grid .mantine-InputWrapper-description {
+  line-height: 1.2;
+}
+
 .map-stage {
   position: relative;
   border: 1px solid rgba(17, 33, 31, 0.14);
@@ -42,6 +50,7 @@
   padding: 8px 10px;
   display: grid;
   gap: 6px;
+  min-width: 170px;
 }
 
 .legend-item {
@@ -74,6 +83,71 @@
   background: #e03131;
 }
 
+.map-layer-controls {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 500;
+  width: min(200px, calc(100% - 24px));
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(17, 33, 31, 0.14);
+  border-radius: 10px;
+  padding: 4px 5px;
+  display: grid;
+  gap: 4px;
+  max-height: 44%;
+  overflow: auto;
+}
+
+.layer-switch-item {
+  border: 1px solid rgba(17, 33, 31, 0.1);
+  border-left-width: 3px;
+  border-radius: 8px;
+  padding: 3px 5px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.layer-switch-item .layer-switch-label {
+  flex: 1;
+  line-height: 1.2;
+  font-size: 12px;
+}
+
+.layer-switch-item--heat {
+  border-left-color: #0ca678;
+}
+
+.layer-switch-item--icing {
+  border-left-color: #2563eb;
+}
+
+.layer-switch-item--fog {
+  border-left-color: #64748b;
+}
+
+.layer-switch-item--thunder {
+  border-left-color: #7c3aed;
+}
+
+.layer-switch-item--wind {
+  border-left-color: #f08c00;
+}
+
+.route-direction-chip {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  z-index: 500;
+  background: rgba(17, 33, 31, 0.86);
+  color: #f8fafc;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.28);
+}
+
 .map-error {
   position: absolute;
   left: 12px;
@@ -85,6 +159,84 @@
 .leaflet-map {
   width: 100%;
   height: 460px;
+}
+
+.plane-marker {
+  background: transparent;
+  border: none;
+}
+
+.plane-marker-inner {
+  width: 34px;
+  height: 34px;
+  display: block;
+  transform-origin: 50% 50%;
+  transition: transform 0.45s linear;
+}
+
+.plane-marker-inner svg {
+  width: 34px;
+  height: 34px;
+  display: block;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
+}
+
+.plane-marker-inner path {
+  fill: #ffd43b;
+  stroke: #0f172a;
+  stroke-width: 2.2;
+}
+
+.route-endpoint-wrapper {
+  background: transparent;
+  border: none;
+}
+
+.route-endpoint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.route-endpoint-pin {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 3px rgba(17, 33, 31, 0.24), 0 4px 10px rgba(15, 23, 42, 0.28);
+}
+
+.route-endpoint-code {
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(17, 33, 31, 0.14);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #102a43;
+  letter-spacing: 0.01em;
+}
+
+.route-endpoint--from .route-endpoint-pin {
+  background: #0ca678;
+}
+
+.route-endpoint--to .route-endpoint-pin {
+  background: #fa5252;
+}
+
+.route-endpoint-tooltip {
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 8px;
+  border: 1px solid rgba(17, 33, 31, 0.2);
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.14);
+}
+
+.route-endpoint-tooltip::before {
+  border-top-color: rgba(17, 33, 31, 0.22);
 }
 
 .leaflet-top.leaflet-right {
@@ -118,12 +270,22 @@
   cursor: pointer;
 }
 
+.flight-row--departed {
+  cursor: default;
+  opacity: 0.86;
+}
+
 .flight-actions {
-  min-width: 220px;
+  min-width: 360px;
 }
 
 @media (max-width: 760px) {
   .form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .map-layer-controls {
+    width: min(180px, calc(100% - 24px));
+    max-height: 40%;
   }
 }

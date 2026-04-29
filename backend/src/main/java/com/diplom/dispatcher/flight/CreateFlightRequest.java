@@ -7,6 +7,7 @@ import java.time.LocalDateTime;
 
 public record CreateFlightRequest(
         @NotBlank String flightNumber,
+        String aircraftType,
         @NotNull LocalDateTime departureAt,
         LocalDateTime arrivalAt,
         @NotBlank String fromAirportId,

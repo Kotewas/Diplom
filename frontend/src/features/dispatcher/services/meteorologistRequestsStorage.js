@@ -1,5 +1,6 @@
 const ACTIVE_REQUEST_KEY = 'dispatcher.activeMeteorologistRequest'
 const CHAT_LOG_KEY = 'dispatcher.meteorologistChatLog'
+const DISPATCHER_LAST_SEEN_RESPONSE_KEY = 'dispatcher.lastSeenMeteorologistResponseId'
 
 export function saveActiveMeteorologistRequest(payload) {
   const normalized = {
@@ -88,6 +89,32 @@ export function readMeteorologistChatLog() {
   }
 }
 
+export function readNewMeteorologistResponsesForDispatcher() {
+  const chatLog = readMeteorologistChatLog()
+  const responses = chatLog.filter(
+    (item) => item?.direction === 'outgoing' && item?.messageType === 'meteorologist_response' && item?.id,
+  )
+  if (responses.length === 0) return []
+
+  const lastSeenResponseId = readDispatcherLastSeenMeteorologistResponseId()
+
+  if (!lastSeenResponseId) {
+    return [responses[0]]
+  }
+
+  const lastSeenIndex = responses.findIndex((item) => item.id === lastSeenResponseId)
+  if (lastSeenIndex === -1) {
+    return [responses[0]]
+  }
+
+  return responses.slice(0, lastSeenIndex)
+}
+
+export function markMeteorologistResponsesSeenForDispatcher(responseId) {
+  if (!responseId) return
+  writeDispatcherLastSeenMeteorologistResponseId(responseId)
+}
+
 export function markIncomingNotificationRead(requestId) {
   if (!requestId) return readMeteorologistChatLog()
 
@@ -132,6 +159,23 @@ function markIncomingNotificationAnswered(requestId) {
 function writeChatLog(log) {
   try {
     window.localStorage.setItem(CHAT_LOG_KEY, JSON.stringify(Array.isArray(log) ? log : []))
+  } catch {
+    // no-op
+  }
+}
+
+function readDispatcherLastSeenMeteorologistResponseId() {
+  try {
+    const raw = window.localStorage.getItem(DISPATCHER_LAST_SEEN_RESPONSE_KEY)
+    return raw ? String(raw) : ''
+  } catch {
+    return ''
+  }
+}
+
+function writeDispatcherLastSeenMeteorologistResponseId(responseId) {
+  try {
+    window.localStorage.setItem(DISPATCHER_LAST_SEEN_RESPONSE_KEY, String(responseId))
   } catch {
     // no-op
   }

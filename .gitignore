@@ -10,3 +10,8 @@ Thumbs.db
 # Temp
 *.swp
 *~
+
+# Env and secrets
+.env
+.env.*
+!.env.example

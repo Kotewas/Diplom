@@ -7,6 +7,7 @@ public record FlightDto(
         String id,
         Instant createdAt,
         String flightNumber,
+        String aircraftType,
         LocalDateTime departureAt,
         LocalDateTime arrivalAt,
         String fromAirportId,
@@ -15,6 +16,11 @@ public record FlightDto(
         FlightRiskDto arrivalRisk,
         FlightRiskDto cruiseRisk,
         Integer totalRisk,
-        FeasibilityDto feasibility
+        FeasibilityDto feasibility,
+        Instant riskUpdatedAt,
+        String dispatcherDecision,
+        String dispatcherDecisionReason,
+        Instant dispatcherDecisionAt,
+        Integer dispatcherDecisionDelayMinutes
 ) {
 }
