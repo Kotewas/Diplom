@@ -11,6 +11,9 @@ Thumbs.db
 *.swp
 *~
 
+# Local runtime data
+backend/.local-db/
+
 # Env and secrets
 .env
 .env.*

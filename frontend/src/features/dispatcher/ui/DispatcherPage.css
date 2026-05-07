@@ -2,6 +2,14 @@
   color: #11211f;
 }
 
+.notification-stack {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 2000;
+  width: min(420px, calc(100vw - 32px));
+}
+
 .surface-card {
   border-color: rgba(17, 33, 31, 0.1);
   background: rgba(255, 255, 255, 0.82);
@@ -255,6 +263,78 @@
   background: rgba(255, 255, 255, 0.92);
 }
 
+.critical-tile {
+  border-color: rgba(17, 33, 31, 0.12);
+  background: #fff;
+}
+
+.critical-tile--risk {
+  border-left: 4px solid #e03131;
+}
+
+.critical-tile--data {
+  border-left: 4px solid #f08c00;
+}
+
+.critical-tile--delay {
+  border-left: 4px solid #fab005;
+}
+
+.flight-row--urgent-missing {
+  background: rgba(224, 49, 49, 0.13);
+}
+
+.flight-row--urgent-stale {
+  background: rgba(255, 107, 107, 0.09);
+}
+
+.flight-row--highlighted {
+  box-shadow: inset 0 0 0 1px rgba(34, 139, 230, 0.3);
+  background: rgba(34, 139, 230, 0.06);
+}
+
+.risk-reason-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #e03131;
+  flex: 0 0 auto;
+}
+
+.history-item {
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.analytics-bar {
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(17, 33, 31, 0.08);
+}
+
+.analytics-bar-fill {
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+}
+
+.analytics-bar-fill--low {
+  background: #13977b;
+}
+
+.analytics-bar-fill--medium {
+  background: #df9f18;
+}
+
+.analytics-bar-fill--high {
+  background: #ea6a14;
+}
+
+.analytics-bar-fill--critical,
+.analytics-bar-fill--no_data {
+  background: #e03131;
+}
+
 .event-button {
   justify-content: flex-start;
 }
@@ -264,6 +344,20 @@
   border-radius: 14px;
   overflow: auto;
   background: rgba(255, 255, 255, 0.84);
+}
+
+.flights-table-wrap th,
+.flights-table-wrap td {
+  font-size: 13px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  vertical-align: top;
+}
+
+.flights-table-wrap .mantine-Badge-label {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
 }
 
 .flight-row {
@@ -276,7 +370,150 @@
 }
 
 .flight-actions {
-  min-width: 360px;
+  min-width: 430px;
+  flex-wrap: nowrap !important;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+}
+
+.flight-actions .mantine-Button-root,
+.flight-actions .mantine-ActionIcon-root {
+  flex-shrink: 0;
+}
+
+.flight-actions-wrap {
+  position: relative;
+  display: flex;
+  justify-content: flex-start;
+  width: 100%;
+  min-height: 34px;
+  padding-top: 2px;
+  margin-top: 0;
+  margin-left: 0;
+}
+
+.flight-data-status-cell {
+  min-width: 220px;
+}
+
+.flight-decision-cell {
+  min-width: 190px;
+}
+
+.flight-route-cell {
+  min-width: 150px;
+}
+
+.flight-departure-cell {
+  min-width: 120px;
+}
+
+.col-departure {
+  text-align: left;
+  padding-left: 4px !important;
+  transform: translateX(-10px);
+}
+
+.col-arrival {
+  text-align: left;
+  padding-left: 10px !important;
+}
+
+.col-risk {
+  text-align: left;
+  padding-left: 12px !important;
+}
+
+.col-decision {
+  text-align: left;
+  padding-left: 8px !important;
+  min-width: 220px;
+}
+
+.col-actions {
+  text-align: left;
+  min-width: 340px;
+  vertical-align: middle !important;
+}
+
+.flight-type-cell {
+  min-width: 120px;
+}
+
+.flight-status-text {
+  line-height: 1.3;
+  white-space: normal;
+  word-break: break-word;
+  color: #2f3e46;
+  font-family: inherit;
+}
+
+.flight-status-text--actual {
+  color: #0f8f4f;
+}
+
+.flight-status-text--default {
+  color: #2f3e46;
+}
+
+.risk-meta-line {
+  white-space: nowrap;
+}
+
+.flight-actions-cell {
+  text-align: left;
+}
+
+.flight-actions-grid {
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+}
+
+.flight-actions-row {
+  min-width: 0;
+  width: 100%;
+  justify-content: flex-start;
+  align-items: center;
+}
+
+.history-risk-text {
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.decision-badge-clickable {
+  cursor: pointer;
+}
+
+.weather-pie {
+  width: 160px;
+  height: 160px;
+  border-radius: 999px;
+  border: 1px solid rgba(17, 33, 31, 0.12);
+  box-shadow: inset 0 0 0 14px rgba(255, 255, 255, 0.94);
+}
+
+.pie-legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.pie-legend-dot--calm {
+  background: #12b886;
+}
+
+.pie-legend-dot--warning {
+  background: #fab005;
+}
+
+.pie-legend-dot--severe {
+  background: #fa5252;
 }
 
 @media (max-width: 760px) {

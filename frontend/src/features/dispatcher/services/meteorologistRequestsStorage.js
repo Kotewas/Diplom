@@ -6,6 +6,7 @@ export function saveActiveMeteorologistRequest(payload) {
   const normalized = {
     ...payload,
     dispatcherName: payload?.dispatcherName || 'Диспетчер',
+    dataComplete: payload?.dataComplete ?? true,
   }
 
   try {
@@ -45,11 +46,26 @@ export function updateActiveMeteorologistResponse(responseByNeed) {
   if (!activeRequest) return null
 
   const answeredAt = new Date().toISOString()
+  
+  // Вычисляем полноту ответа
+  const requestedNeedKeys = Object.entries(activeRequest.needs || {})
+    .filter(([, isNeeded]) => isNeeded)
+    .map(([key]) => key)
+  
+  const emptyCount = requestedNeedKeys.filter(key => {
+    const value = responseByNeed[key]
+    return !value || (typeof value === 'string' && !value.trim())
+  }).length
+  
+  const responseComplete = emptyCount === 0
+  
   const updated = {
     ...activeRequest,
     status: 'answered',
     answeredAt,
     responseByNeed,
+    responseComplete,
+    emptyFieldsCount: emptyCount,
   }
 
   markIncomingNotificationAnswered(activeRequest.id)
@@ -62,7 +78,9 @@ export function updateActiveMeteorologistResponse(responseByNeed) {
     createdAt: answeredAt,
     dispatcherName: activeRequest.dispatcherName || 'Диспетчер',
     flightNumber: activeRequest.form?.flightNumber || '',
-    text: 'Данные успешно отправлены',
+    text: responseComplete 
+      ? 'Данные успешно отправлены' 
+      : `Данные отправлены (${emptyCount} незаполн. полей)`,
     requestSnapshot: updated,
   })
 
@@ -108,6 +126,12 @@ export function readNewMeteorologistResponsesForDispatcher() {
   }
 
   return responses.slice(0, lastSeenIndex)
+}
+
+export function countMeteorologistRequests() {
+  return readMeteorologistChatLog().filter(
+    (item) => item?.direction === 'incoming' && item?.messageType === 'dispatcher_request',
+  ).length
 }
 
 export function markMeteorologistResponsesSeenForDispatcher(responseId) {

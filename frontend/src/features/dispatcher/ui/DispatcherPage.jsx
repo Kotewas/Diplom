@@ -22,12 +22,12 @@ import {
   Text,
   Textarea,
   TextInput,
-  Tooltip,
   Title,
 } from '@mantine/core'
 import {
   IconAlertCircle,
   IconAlertTriangle,
+  IconFileText,
   IconMessageCircle,
   IconRefresh,
   IconTrash,
@@ -42,31 +42,33 @@ import {
   getStormWarning,
   evaluateTemporalRisk,
   riskLevelLabel,
+  safeNumber,
 } from '../model/risk'
+import {
+  getRiskAdjustmentFactor,
+} from '../model/meteorologistValidation'
 import { loadLeafletAssets } from '../services/leafletLoader'
 import {
   applyFlightDecision as applyFlightDecisionApi,
   cancelFlight as cancelFlightApi,
   createFlight as createFlightApi,
   fetchAllFlights,
+  fetchFlightHistory,
   refreshFlightRisk as refreshFlightRiskApi,
   simulateFlightDelayWhatIf as simulateFlightDelayWhatIfApi,
 } from '../services/flightsApi'
 import { fetchAirports as fetchAirportsApi } from '../services/airportsApi'
 import { readFlightsCache, writeFlightsCache } from '../services/flightsCacheStorage'
 import {
+  countMeteorologistRequests,
   markMeteorologistResponsesSeenForDispatcher,
+  readMeteorologistChatLog,
   readNewMeteorologistResponsesForDispatcher,
+  saveActiveMeteorologistRequest,
 } from '../services/meteorologistRequestsStorage'
+import { DEFAULT_METEOROLOGIST_NEEDS } from '../model/meteorologistNeeds'
 import { fetchWeatherByAirport, isWeatherCacheFresh } from '../services/weatherApi'
 import './DispatcherPage.css'
-
-const RISK_LEGEND = [
-  { label: 'Низкий', className: 'dot-low' },
-  { label: 'Умеренный', className: 'dot-medium' },
-  { label: 'Высокий', className: 'dot-high' },
-  { label: 'Критический', className: 'dot-critical' },
-]
 
 const AIRLINE_IATA_CODES = ['SU', 'DP', 'FV', 'UT', 'EO', 'YC', 'WZ', 'RA']
 const TRANSPORT_MODE_AIRPLANE = 'AIRPLANE'
@@ -78,21 +80,47 @@ const AIRPLANE_MIN_TOTAL_FLIGHT_MINUTES = 35
 const HELICOPTER_CRUISE_SPEED_KMH = 220
 const HELICOPTER_OPERATIONS_MINUTES = 12
 const HELICOPTER_MIN_TOTAL_FLIGHT_MINUTES = 18
-const ROUTE_STEPS = 96
 const DEPARTURE_TIME_STEP_MINUTES = 5
 const MIN_DEPARTURE_LEAD_MINUTES = 1
 const DEFAULT_DEPARTURE_LEAD_MINUTES = 60
+const RISK_LEGEND = [
+  { label: 'Низкий риск', className: 'dot-low' },
+  { label: 'Средний риск', className: 'dot-medium' },
+  { label: 'Высокий риск', className: 'dot-high' },
+  { label: 'Критический риск', className: 'dot-critical' },
+]
 const DISPATCHER_DECISION_PENDING = 'PENDING'
 const DISPATCHER_DECISION_APPROVE = 'APPROVE'
 const DISPATCHER_DECISION_DELAY = 'DELAY'
 const DISPATCHER_DECISION_CANCEL = 'CANCEL'
 const WHAT_IF_DELAY_OPTIONS = [15, 30, 60, 120]
 const RECOVERY_CHECK_INTERVAL_MS = 20000
-const RISK_HEATMAP_MAX_POINTS = 240
-const ICING_AIRPORTS_LIMIT = 80
-const ICING_WEATHER_LOAD_LIMIT = 24
-const AIRPORT_SCOPE_PASSENGER = 'PASSENGER'
-const AIRPORT_SCOPE_ALL = 'ALL'
+const FLIGHTS_POLL_INTERVAL_MS = 60000
+const URGENT_DEPARTURE_WINDOW_MS = 3 * 60 * 60 * 1000
+const CRITICAL_PREDEPARTURE_WINDOW_MS = 1 * 60 * 60 * 1000
+const RISK_DATA_STALE_MS = 3 * 60 * 60 * 1000
+const FLIGHT_RISK_FILTERS = [
+  { value: 'ALL', label: 'Все риски' },
+  { value: 'LOW', label: 'Низкий' },
+  { value: 'MEDIUM', label: 'Умеренный' },
+  { value: 'HIGH', label: 'Высокий' },
+  { value: 'CRITICAL', label: 'Критический' },
+  { value: 'NO_DATA', label: 'Нет данных' },
+]
+const FLIGHT_STATUS_FILTERS = [
+  { value: 'ALL', label: 'Все статусы' },
+  { value: DISPATCHER_DECISION_PENDING, label: 'Ожидает решения' },
+  { value: DISPATCHER_DECISION_APPROVE, label: 'Разрешен' },
+  { value: DISPATCHER_DECISION_DELAY, label: 'Задержан' },
+  { value: DISPATCHER_DECISION_CANCEL, label: 'Отменен' },
+]
+const DEPARTURE_TIME_FILTERS = [
+  { value: 'ALL', label: 'Любое время' },
+  { value: 'NEXT_3H', label: 'До 3 часов' },
+  { value: 'TODAY', label: 'Сегодня' },
+  { value: 'TOMORROW', label: 'Завтра' },
+  { value: 'LATER', label: 'Позже' },
+]
 const PLANE_ICON_HTML = `
   <span class="plane-marker-inner">
     <svg viewBox="0 0 64 64" aria-hidden="true" focusable="false">
@@ -109,6 +137,7 @@ function toDateTimeLocalInputValue(date) {
   if (!(date instanceof Date) || Number.isNaN(date.getTime())) return ''
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}`
 }
+
 
 function roundDateUpToMinuteStep(date, stepMinutes = DEPARTURE_TIME_STEP_MINUTES) {
   if (!(date instanceof Date) || Number.isNaN(date.getTime())) return new Date()
@@ -159,15 +188,41 @@ function createInitialForm(
 }
 
 function getRiskColor(score) {
-  if (score <= 30) return 'teal'
+  if (score <= 30) return 'green'
   if (score <= 55) return 'yellow'
   if (score <= 75) return 'orange'
   return 'red'
 }
 
+function getRiskBadgeColor(score) {
+  if (!Number.isFinite(Number(score))) return 'gray'
+  if (score <= 30) return 'cyan'
+  if (score <= 55) return 'blue'
+  if (score <= 75) return 'orange'
+  return 'red'
+}
+
+function formatRiskBadgeScore(score) {
+  if (!Number.isFinite(Number(score))) return '–'
+  const normalized = Math.max(5, Math.round(Number(score)))
+  return `${normalized}/100`
+}
+
 function asNumberOrNull(value) {
   const numeric = Number(value)
   return Number.isFinite(numeric) ? numeric : null
+}
+
+function withDisplayRiskFloor(score) {
+  const numeric = asNumberOrNull(score)
+  if (numeric == null) return null
+  return Math.max(5, Math.round(numeric))
+}
+
+function getDisplayProgressValue(score) {
+  const numeric = asNumberOrNull(score)
+  if (numeric == null || numeric <= 0) return 0
+  return Math.max(8, Math.round(numeric))
 }
 
 function formatFixedOrNA(value, digits = 1) {
@@ -242,23 +297,21 @@ function normalizeSearchText(value) {
   return String(value ?? '').trim().toLowerCase()
 }
 
-function isPassengerAirportCandidate(airport) {
-  const airportId = String(airport?.id ?? '').trim().toUpperCase()
-  if (!airportId || airportId.endsWith('_HELI')) return false
-  if (/^RU-\d+$/i.test(airportId)) return false
-  if (/^[A-Z]{3}$/.test(airportId)) return true
-
-  const airportName = normalizeSearchText(airport?.name)
-  if (!airportName) return false
-  return airportName.includes('международ')
+function getAirportDisplayName(airport) {
+  if (!airport) return ''
+  const code = String(airport.id ?? '').trim()
+  const name = String(airport.name ?? '').trim()
+  const city = String(airport.city ?? '').trim()
+  const label = name || city || 'Без названия'
+  return code ? `${code} - ${label}` : label
 }
 
 function haversineDistanceKm(fromAirport, toAirport) {
   const earthRadiusKm = 6371
   const latDistanceRad = ((toAirport.lat - fromAirport.lat) * Math.PI) / 180
-  const lonDistanceRad = ((toAirport.lon - fromAirport.lon) * Math.PI) / 180
-  const startLatRad = (fromAirport.lat * Math.PI) / 180
-  const endLatRad = (toAirport.lat * Math.PI) / 180
+  const lonDistanceRad = toRadians(normalizeLongitude(toAirport.lon - fromAirport.lon))
+  const startLatRad = toRadians(fromAirport.lat)
+  const endLatRad = toRadians(toAirport.lat)
 
   const a =
     Math.sin(latDistanceRad / 2) * Math.sin(latDistanceRad / 2) +
@@ -286,42 +339,11 @@ function normalizeLongitude(value) {
   return lon
 }
 
-function buildOrthodromePath(fromAirport, toAirport, steps = ROUTE_STEPS) {
-  const lat1 = toRadians(fromAirport.lat)
-  const lon1 = toRadians(fromAirport.lon)
-  const lat2 = toRadians(toAirport.lat)
-  const lon2 = toRadians(toAirport.lon)
-  const angularDistance = 2 * Math.asin(
-    Math.sqrt(
-      Math.sin((lat2 - lat1) / 2) ** 2
-      + Math.cos(lat1) * Math.cos(lat2) * Math.sin((lon2 - lon1) / 2) ** 2,
-    ),
-  )
-
-  if (!Number.isFinite(angularDistance) || angularDistance < 1e-10) {
-    return [
-      [fromAirport.lat, fromAirport.lon],
-      [toAirport.lat, toAirport.lon],
-    ]
-  }
-
-  const points = []
-  for (let index = 0; index <= steps; index += 1) {
-    const fraction = index / steps
-    const a = Math.sin((1 - fraction) * angularDistance) / Math.sin(angularDistance)
-    const b = Math.sin(fraction * angularDistance) / Math.sin(angularDistance)
-
-    const x = a * Math.cos(lat1) * Math.cos(lon1) + b * Math.cos(lat2) * Math.cos(lon2)
-    const y = a * Math.cos(lat1) * Math.sin(lon1) + b * Math.cos(lat2) * Math.sin(lon2)
-    const z = a * Math.sin(lat1) + b * Math.sin(lat2)
-
-    const lat = Math.atan2(z, Math.sqrt(x * x + y * y))
-    const lon = Math.atan2(y, x)
-
-    points.push([toDegrees(lat), normalizeLongitude(toDegrees(lon))])
-  }
-
-  return points
+function buildOrthodromePath(fromAirport, toAirport) {
+  return [
+    [fromAirport.lat, fromAirport.lon],
+    [toAirport.lat, toAirport.lon],
+  ]
 }
 
 function getPathPointAt(path, fraction) {
@@ -380,11 +402,20 @@ function formatTimeLeftToDeparture(value, nowTimestamp) {
   const diffMs = departureDate.getTime() - nowTimestamp
   if (diffMs <= 0) return 'вылет уже прошел'
 
-  const totalHours = Math.ceil(diffMs / (1000 * 60 * 60))
-  const days = Math.floor(totalHours / 24)
-  const hours = totalHours % 24
+  const totalMinutes = Math.ceil(diffMs / (1000 * 60))
+  const days = Math.floor(totalMinutes / (60 * 24))
+  const hours = Math.floor((totalMinutes % (60 * 24)) / 60)
+  const minutes = totalMinutes % 60
 
-  return `осталось: ${days} д ${hours} ч`
+  if (days > 0) {
+    return `осталось: ${days} д ${hours} ч ${minutes} мин`
+  }
+
+  if (hours > 0) {
+    return `осталось: ${hours} ч ${minutes} мин`
+  }
+
+  return `осталось: ${minutes} мин`
 }
 
 function isFlightDeparted(flight, nowTimestamp) {
@@ -411,19 +442,14 @@ function isBackendConnectivityError(message) {
   )
 }
 
-function getRiskHeatColor(score) {
-  if (score <= 30) return '#099268'
-  if (score <= 55) return '#f08c00'
-  if (score <= 75) return '#f76707'
-  return '#e03131'
-}
+
 
 function calculateTotalRisk(departureRisk, arrivalRisk, cruiseRisk, temporalRisk) {
   return clampScore(
-    departureRisk.score * 0.34
-      + arrivalRisk.score * 0.34
-      + cruiseRisk.score * 0.22
-      + temporalRisk.score * 0.1,
+    departureRisk.score * 0.31
+      + arrivalRisk.score * 0.31
+      + cruiseRisk.score * 0.2
+      + temporalRisk.score * 0.18,
   )
 }
 
@@ -436,272 +462,6 @@ function hasWeatherPayload(weather) {
     || Number.isFinite(Number(weather?.visibility))
     || Array.isArray(weather?.weather)
   )
-}
-
-function getIcingColor(level) {
-  if (level === 'severe') return '#1d4ed8'
-  if (level === 'warning') return '#2563eb'
-  return '#60a5fa'
-}
-
-function getFogColor(level) {
-  if (level === 'severe') return '#475569'
-  if (level === 'warning') return '#64748b'
-  return '#94a3b8'
-}
-
-function getThunderColor(level) {
-  if (level === 'severe') return '#7c3aed'
-  if (level === 'warning') return '#8b5cf6'
-  return '#a78bfa'
-}
-
-function getWindColor(level) {
-  if (level === 'severe') return '#e8590c'
-  if (level === 'warning') return '#f08c00'
-  return '#fab005'
-}
-
-function getIcingHazard(weather) {
-  if (!weather || typeof weather !== 'object') return null
-
-  const temp = asNumberOrNull(weather?.main?.temp)
-  const humidity = asNumberOrNull(weather?.main?.humidity)
-  const cloudiness = asNumberOrNull(weather?.clouds?.all)
-  const visibility = asNumberOrNull(weather?.visibility)
-  const precipPerHour = asNumberOrNull(getPrecipPerHour(weather)) ?? 0
-  const weatherCode = asNumberOrNull(weather?.weather?.[0]?.id) ?? 800
-
-  let score = 0
-  const reasons = []
-
-  const addReason = (text) => {
-    if (!text) return
-    if (!reasons.includes(text)) reasons.push(text)
-  }
-
-  if (temp != null && temp <= 5 && temp >= -25) {
-    score += 16
-    addReason(`Температура ${temp.toFixed(1)}°C в потенциальной зоне обледенения`)
-  }
-  if (temp != null && temp <= 0 && temp >= -15) score += 10
-
-  if (humidity != null && humidity >= 80) {
-    score += 12
-    addReason(`Влажность ${Math.round(humidity)}%`)
-  }
-  if (cloudiness != null && cloudiness >= 70) {
-    score += 10
-    addReason(`Облачность ${Math.round(cloudiness)}%`)
-  }
-
-  if (precipPerHour >= 0.2) {
-    score += 14
-    addReason(`Осадки ${precipPerHour.toFixed(1)} мм/ч`)
-  }
-  if (precipPerHour >= 1) score += 10
-
-  if (weatherCode === 511 || weatherCode === 611 || weatherCode === 612 || weatherCode === 613) {
-    score += 28
-    addReason('Ледяной дождь/переохлажденные осадки')
-  } else if (weatherCode >= 600 && weatherCode < 700) {
-    score += 16
-    addReason('Снежные осадки')
-  }
-
-  if (visibility != null && visibility < 3000) {
-    score += 6
-    addReason(`Сниженная видимость ${Math.round(visibility)} м`)
-  }
-
-  const finalScore = clampScore(score)
-  if (finalScore < 20) return null
-
-  const level = finalScore >= 65 ? 'severe' : finalScore >= 45 ? 'warning' : 'watch'
-  const title =
-    level === 'severe'
-      ? 'Высокий риск оледенения'
-      : level === 'warning'
-        ? 'Умеренный риск оледенения'
-        : 'Слабый риск оледенения'
-
-  return {
-    level,
-    score: finalScore,
-    title,
-    reasons,
-  }
-}
-
-function getFogHazard(weather) {
-  if (!weather || typeof weather !== 'object') return null
-
-  const visibility = asNumberOrNull(weather?.visibility)
-  const humidity = asNumberOrNull(weather?.main?.humidity)
-  const cloudiness = asNumberOrNull(weather?.clouds?.all)
-  const weatherCode = asNumberOrNull(weather?.weather?.[0]?.id) ?? 800
-
-  let score = 0
-  const reasons = []
-
-  const addReason = (text) => {
-    if (!text) return
-    if (!reasons.includes(text)) reasons.push(text)
-  }
-
-  if (visibility != null && visibility < 8000) {
-    score += 14
-    addReason(`Сниженная видимость ${Math.round(visibility)} м`)
-  }
-  if (visibility != null && visibility < 5000) score += 12
-  if (visibility != null && visibility < 2500) score += 16
-  if (visibility != null && visibility < 1000) {
-    score += 20
-    addReason('Очень низкая видимость')
-  }
-
-  if (humidity != null && humidity >= 85) {
-    score += 8
-    addReason(`Влажность ${Math.round(humidity)}%`)
-  }
-  if (cloudiness != null && cloudiness >= 80) {
-    score += 6
-    addReason(`Облачность ${Math.round(cloudiness)}%`)
-  }
-
-  if (weatherCode === 741 || weatherCode === 701 || weatherCode === 721) {
-    score += 24
-    addReason('Туман/дымка по коду погоды')
-  } else if (weatherCode === 731 || weatherCode === 751 || weatherCode === 761) {
-    score += 10
-    addReason('Пылевые/аэрозольные явления')
-  }
-
-  const finalScore = clampScore(score)
-  if (finalScore < 20) return null
-
-  const level = finalScore >= 70 ? 'severe' : finalScore >= 45 ? 'warning' : 'watch'
-  const title =
-    level === 'severe'
-      ? 'Критическая видимость'
-      : level === 'warning'
-        ? 'Риск тумана'
-        : 'Фон тумана'
-
-  return {
-    level,
-    score: finalScore,
-    title,
-    reasons,
-  }
-}
-
-function getThunderHazard(weather) {
-  if (!weather || typeof weather !== 'object') return null
-
-  const weatherCode = asNumberOrNull(weather?.weather?.[0]?.id) ?? 800
-  const wind = asNumberOrNull(weather?.wind?.speed) ?? 0
-  const gust = asNumberOrNull(weather?.wind?.gust) ?? wind
-  const precipPerHour = asNumberOrNull(getPrecipPerHour(weather)) ?? 0
-  const cloudiness = asNumberOrNull(weather?.clouds?.all)
-
-  let score = 0
-  const reasons = []
-
-  const addReason = (text) => {
-    if (!text) return
-    if (!reasons.includes(text)) reasons.push(text)
-  }
-
-  if (weatherCode >= 200 && weatherCode < 300) {
-    score += 56
-    addReason('Грозовая активность по коду погоды')
-  }
-  if (weatherCode >= 500 && weatherCode < 600 && precipPerHour >= 2) {
-    score += 18
-    addReason(`Ливневые осадки ${precipPerHour.toFixed(1)} мм/ч`)
-  }
-  if (weatherCode >= 300 && weatherCode < 400) score += 8
-
-  if (gust >= 14) {
-    score += 10
-    addReason(`Порывы ${gust.toFixed(1)} м/с`)
-  }
-  if (gust >= 20) score += 12
-  if (wind >= 12) score += 8
-
-  if (cloudiness != null && cloudiness >= 90) {
-    score += 8
-    addReason(`Высокая облачность ${Math.round(cloudiness)}%`)
-  }
-
-  const finalScore = clampScore(score)
-  if (finalScore < 20) return null
-
-  const level = finalScore >= 70 ? 'severe' : finalScore >= 45 ? 'warning' : 'watch'
-  const title =
-    level === 'severe'
-      ? 'Шторм/гроза'
-      : level === 'warning'
-        ? 'Вероятность грозы'
-        : 'Грозовой фон'
-
-  return {
-    level,
-    score: finalScore,
-    title,
-    reasons,
-  }
-}
-
-function getWindHazard(weather) {
-  if (!weather || typeof weather !== 'object') return null
-
-  const wind = asNumberOrNull(weather?.wind?.speed) ?? 0
-  const gust = asNumberOrNull(weather?.wind?.gust) ?? wind
-
-  let score = 0
-  const reasons = []
-
-  const addReason = (text) => {
-    if (!text) return
-    if (!reasons.includes(text)) reasons.push(text)
-  }
-
-  if (wind >= 10) {
-    score += 16
-    addReason(`Устойчивый ветер ${wind.toFixed(1)} м/с`)
-  }
-  if (wind >= 14) score += 14
-  if (wind >= 18) score += 16
-
-  if (gust >= 15) {
-    score += 14
-    addReason(`Порывы ${gust.toFixed(1)} м/с`)
-  }
-  if (gust >= 20) score += 14
-  if (gust >= 25) {
-    score += 18
-    addReason('Опасные шквальные порывы')
-  }
-
-  const finalScore = clampScore(score)
-  if (finalScore < 20) return null
-
-  const level = finalScore >= 70 ? 'severe' : finalScore >= 45 ? 'warning' : 'watch'
-  const title =
-    level === 'severe'
-      ? 'Сильный ветер'
-      : level === 'warning'
-        ? 'Повышенный ветер'
-        : 'Ветровой фон'
-
-  return {
-    level,
-    score: finalScore,
-    title,
-    reasons,
-  }
 }
 
 function formatRiskUpdatedAgo(value, nowTimestamp) {
@@ -723,6 +483,197 @@ function formatRiskUpdatedAgo(value, nowTimestamp) {
 
   const days = Math.floor(hours / 24)
   return `последнее обновление: ${days} д назад`
+}
+
+function isDepartureWithinUrgentWindow(flight, nowTimestamp) {
+  const departureDate = parseDateTime(flight?.departureAt)
+  if (!departureDate) return false
+  const diffMs = departureDate.getTime() - nowTimestamp
+  return diffMs > 0 && diffMs < URGENT_DEPARTURE_WINDOW_MS
+}
+
+function hasFlightRiskData(flight) {
+  return Number.isFinite(Number(flight?.totalRisk))
+}
+
+function isFlightRiskDataStale(flight, nowTimestamp) {
+  const riskUpdatedAt = parseDateTime(
+    flight?.riskUpdatedAt ?? flight?.cachedRiskUpdatedAt ?? flight?.createdAt,
+  )
+  if (!riskUpdatedAt) return true
+  return nowTimestamp - riskUpdatedAt.getTime() > RISK_DATA_STALE_MS
+}
+
+function needsUrgentWeatherUpdate(flight, nowTimestamp) {
+  return isDepartureWithinUrgentWindow(flight, nowTimestamp)
+    && hasFlightRiskData(flight)
+    && isFlightRiskDataStale(flight, nowTimestamp)
+}
+
+function hasUrgentMissingRiskData(flight, nowTimestamp) {
+  return isDepartureWithinUrgentWindow(flight, nowTimestamp) && !hasFlightRiskData(flight)
+}
+
+function getRiskLevelFilterValue(score) {
+  const numeric = asNumberOrNull(score)
+  if (numeric == null) return 'NO_DATA'
+  if (numeric <= 30) return 'LOW'
+  if (numeric <= 55) return 'MEDIUM'
+  if (numeric <= 75) return 'HIGH'
+  return 'CRITICAL'
+}
+
+function getDepartureFilterValue(flight, nowTimestamp) {
+  const departureDate = parseDateTime(flight?.departureAt)
+  if (!departureDate) return 'LATER'
+  const nowDate = new Date(nowTimestamp)
+  const startOfToday = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate())
+  const startOfTomorrow = new Date(startOfToday)
+  startOfTomorrow.setDate(startOfTomorrow.getDate() + 1)
+  const startOfDayAfterTomorrow = new Date(startOfTomorrow)
+  startOfDayAfterTomorrow.setDate(startOfDayAfterTomorrow.getDate() + 1)
+
+  if (isDepartureWithinUrgentWindow(flight, nowTimestamp)) return 'NEXT_3H'
+  if (departureDate >= startOfToday && departureDate < startOfTomorrow) return 'TODAY'
+  if (departureDate >= startOfTomorrow && departureDate < startOfDayAfterTomorrow) return 'TOMORROW'
+  return 'LATER'
+}
+
+function getRiskChangeReason(historyItem) {
+  if (historyItem?.dispatcherDecision === DISPATCHER_DECISION_DELAY) {
+    return `Задержка рейса${historyItem.dispatcherDecisionDelayMinutes ? ` на ${historyItem.dispatcherDecisionDelayMinutes} мин` : ''}`
+  }
+  if (historyItem?.dispatcherDecision === DISPATCHER_DECISION_APPROVE) return 'Обновление при разрешении рейса'
+  if (historyItem?.dispatcherDecision === DISPATCHER_DECISION_CANCEL) return 'Решение об отмене рейса'
+  if (historyItem?.oldTotalRisk !== historyItem?.newTotalRisk) return 'Изменились погодные условия'
+  return 'Плановый пересчет'
+}
+
+function collectRiskReasons(flight, nowTimestamp) {
+  const factors = [
+    ...(Array.isArray(flight?.departureRisk?.factors) ? flight.departureRisk.factors : []),
+    ...(Array.isArray(flight?.arrivalRisk?.factors) ? flight.arrivalRisk.factors : []),
+    ...(Array.isArray(flight?.cruiseRisk?.factors) ? flight.cruiseRisk.factors : []),
+    ...(Array.isArray(flight?.temporalRisk?.factors) ? flight.temporalRisk.factors : []),
+  ]
+  const normalizedFactors = factors.map((item) => String(item))
+  const lowerText = normalizedFactors.join(' ').toLowerCase()
+  const reasons = []
+
+  if (/ветер|порыв/.test(lowerText)) reasons.push('сильный ветер')
+  if (/видим|туман|дымк/.test(lowerText)) reasons.push('низкая видимость')
+  if (/осад|дожд|снег|гроза/.test(lowerText)) reasons.push('осадки')
+  if (needsUrgentWeatherUpdate(flight, nowTimestamp)) reasons.push('данные устарели')
+  if (hasUrgentMissingRiskData(flight, nowTimestamp)) reasons.push('нет данных по риску')
+
+  normalizedFactors.forEach((factor) => {
+    if (!reasons.includes(factor)) reasons.push(factor)
+  })
+
+  return reasons.length > 0 ? reasons : ['значимых факторов риска не выявлено']
+}
+
+
+function getRefreshPolicy(departureAt, nowTimestamp) {
+  const departureDate = parseDateTime(departureAt)
+  if (!departureDate) return { intervalMs: 3 * 60 * 60 * 1000, timeLeftMs: null }
+  const timeLeftMs = departureDate.getTime() - nowTimestamp
+
+  if (timeLeftMs > 24 * 60 * 60 * 1000) {
+    return { intervalMs: 24 * 60 * 60 * 1000, timeLeftMs }
+  }
+  if (timeLeftMs > 12 * 60 * 60 * 1000) {
+    return { intervalMs: 6 * 60 * 60 * 1000, timeLeftMs }
+  }
+  return { intervalMs: 3 * 60 * 60 * 1000, timeLeftMs }
+}
+
+function getNextRiskUpdateAt(flight, nowTimestamp) {
+  const riskUpdatedAt = parseDateTime(
+    flight?.riskUpdatedAt ?? flight?.cachedRiskUpdatedAt ?? flight?.createdAt,
+  )
+  if (!riskUpdatedAt) return null
+  const { intervalMs } = getRefreshPolicy(flight?.departureAt, nowTimestamp)
+  return new Date(riskUpdatedAt.getTime() + intervalMs)
+}
+
+function getRecommendationCategory(code) {
+  if (code === 'APPROVE') return 'APPROVE'
+  if (code === 'CANCEL') return 'CANCEL'
+  if (String(code ?? '').startsWith('DELAY')) return 'DELAY'
+  return 'OTHER'
+}
+
+function getAutomaticRecommendationCode(totalRisk) {
+  const numeric = asNumberOrNull(totalRisk)
+  if (numeric == null) return null
+  if (numeric > 75) return 'CANCEL'
+  if (numeric > 45) return 'DELAY_60'
+  return 'APPROVE'
+}
+
+function prioritizeRecommendation(recommendations, code) {
+  if (!code || !Array.isArray(recommendations) || recommendations.length === 0) return recommendations
+  const preferred = recommendations.find((item) => item.code === code)
+  if (!preferred) return recommendations
+  return [
+    {
+      ...preferred,
+      score: Math.max(preferred.score, recommendations[0]?.score ?? preferred.score),
+      reason: `${preferred.reason} Автоматически выбрано по текущему уровню риска.`,
+    },
+    ...recommendations.filter((item) => item.code !== code),
+  ]
+}
+
+function getWeatherTrendPenalty(weather) {
+  if (!weather) return 0
+  const wind = safeNumber(weather.wind?.speed)
+  const gust = safeNumber(weather.wind?.gust, wind)
+  const visibility = safeNumber(weather.visibility, 10000)
+  const precip = getPrecipPerHour(weather)
+  const weatherCode = safeNumber(weather.weather?.[0]?.id, 800)
+
+  let penalty = 0
+  if (wind >= 10) penalty += 5
+  if (wind >= 15) penalty += 7
+  if (gust >= 16) penalty += 6
+  if (visibility < 5000) penalty += 7
+  if (precip >= 0.5) penalty += 6
+  if (precip >= 2) penalty += 7
+  if (weatherCode >= 200 && weatherCode < 300) penalty += 12
+  if (weatherCode === 741 || weatherCode === 701) penalty += 8
+  return penalty
+}
+
+function buildRiskForecast(risk, weather, departureAt, isHelicopter) {
+  if (!risk) return null
+  const departureDate = parseDateTime(departureAt)
+  const futureDepartureAt = departureDate
+    ? new Date(departureDate.getTime() + 2 * 60 * 60 * 1000)
+    : null
+  const currentTemporal = safeNumber(risk.temporal?.score)
+  const futureTemporal = futureDepartureAt
+    ? evaluateTemporalRisk(futureDepartureAt, isHelicopter).score
+    : currentTemporal
+  const trendPenalty = getWeatherTrendPenalty(weather)
+  const forecastRisk = clampScore(
+    safeNumber(risk.total)
+      + trendPenalty
+      + (futureTemporal - currentTemporal) * 0.18,
+  )
+  const direction = forecastRisk > risk.total + 3
+    ? 'повыситься'
+    : forecastRisk < risk.total - 3
+    ? 'снизиться'
+    : 'остаться около текущего уровня'
+
+  return {
+    value: forecastRisk,
+    level: riskLevelLabel(forecastRisk).toUpperCase(),
+    direction,
+    text: `Через 2 часа риск может ${direction} до ${riskLevelLabel(forecastRisk).toUpperCase()}.`,
+  }
 }
 
 function decisionLabel(decision) {
@@ -985,25 +936,64 @@ function hydrateFlightsWithRiskTimestamps(flights, knownFlights = [], fallbackTi
   )
 }
 
+/**
+ * Применяет коэффициент риска если метеоданные неполные
+ */
+function applyMeteoDataRiskAdjustment(risk, meteoDataInfo) {
+  if (!risk || !meteoDataInfo) {
+    return risk
+  }
+
+  const { responseComplete, responseByNeed, needs } = meteoDataInfo
+  
+  if (responseComplete) {
+    return risk
+  }
+
+  const adjustment = getRiskAdjustmentFactor(responseByNeed, needs)
+  
+  if (adjustment === 1.0) {
+    return risk
+  }
+
+  return {
+    ...risk,
+    departure: {
+      ...risk.departure,
+      score: clampScore(risk.departure.score * adjustment),
+    },
+    arrival: {
+      ...risk.arrival,
+      score: clampScore(risk.arrival.score * adjustment),
+    },
+    cruise: {
+      ...risk.cruise,
+      score: clampScore(risk.cruise.score * adjustment),
+    },
+    total: clampScore(risk.total * adjustment),
+  }
+}
+
 export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'monitoring' }) {
   const cachedFlightsOnLoad = useMemo(() => readFlightsCache(), [])
   const mapContainerRef = useRef(null)
   const mapRef = useRef(null)
-  const heatLayerRef = useRef(null)
-  const icingLayerRef = useRef(null)
-  const fogLayerRef = useRef(null)
-  const thunderLayerRef = useRef(null)
-  const windLayerRef = useRef(null)
+
   const airportLayerRef = useRef(null)
   const routeLayerRef = useRef(null)
   const planeLayerRef = useRef(null)
   const weatherCacheRef = useRef({})
   const recoveryModeRef = useRef(false)
+  const previousRecommendationRef = useRef(null)
+  const previousRiskRef = useRef(null)
+  const urgentMeteoRequestedFlightsRef = useRef(new Set())
+  const notificationLastShownAtRef = useRef({})
+  const notificationMutedUntilRef = useRef({})
 
   const [leafletReady, setLeafletReady] = useState(false)
   const [leafletError, setLeafletError] = useState('')
   const [activeTab, setActiveTab] = useState(
-    initialTab === 'flights' ? initialTab : 'monitoring',
+    initialTab === 'flights' || initialTab === 'analytics' ? initialTab : 'monitoring',
   )
   const [transportMode, setTransportMode] = useState(TRANSPORT_MODE_AIRPLANE)
 
@@ -1029,9 +1019,25 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
   const [decisionError, setDecisionError] = useState('')
   const [isDecisionSubmitting, setIsDecisionSubmitting] = useState(false)
   const [isDecisionWhatIfLoading, setIsDecisionWhatIfLoading] = useState(false)
+  const [activeFlightHistory, setActiveFlightHistory] = useState([])
+  const [activeFlightHistoryError, setActiveFlightHistoryError] = useState('')
+  const [isActiveFlightHistoryLoading, setIsActiveFlightHistoryLoading] = useState(false)
+  const [historyFlight, setHistoryFlight] = useState(null)
+  const [historyModalItems, setHistoryModalItems] = useState([])
+  const [historyModalError, setHistoryModalError] = useState('')
+  const [isHistoryModalLoading, setIsHistoryModalLoading] = useState(false)
+  const [flightFilters, setFlightFilters] = useState({
+    search: '',
+    risk: 'ALL',
+    status: 'ALL',
+    airport: 'ALL',
+    departureTime: 'ALL',
+  })
 
   const [selectedWeatherAirportId, setSelectedWeatherAirportId] = useState('')
   const [weatherByAirport, setWeatherByAirport] = useState({})
+  const [notifications, setNotifications] = useState([])
+  const [autoRecommendationNotice, setAutoRecommendationNotice] = useState(null)
 
   const [isEvaluating, setIsEvaluating] = useState(false)
   const [isPreviewEvaluating, setIsPreviewEvaluating] = useState(false)
@@ -1043,13 +1049,7 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
     level: 'MEDIUM',
     comment: '',
   }), [])
-  const [showDepartedFlights, setShowDepartedFlights] = useState(false)
-  const [showRiskHeatmap, setShowRiskHeatmap] = useState(true)
-  const [showIcingLayer, setShowIcingLayer] = useState(true)
-  const [showFogLayer, setShowFogLayer] = useState(true)
-  const [showThunderLayer, setShowThunderLayer] = useState(true)
-  const [showWindLayer, setShowWindLayer] = useState(true)
-  const [airportScope, setAirportScope] = useState(AIRPORT_SCOPE_PASSENGER)
+  const [showDepartedFlights, setShowDepartedFlights] = useState(true)
   const [meteorologistUpdateNotice, setMeteorologistUpdateNotice] = useState(null)
   const [isRecoveryMode, setIsRecoveryMode] = useState(false)
   const [recoveryStartedAt, setRecoveryStartedAt] = useState('')
@@ -1058,6 +1058,9 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
   const [isRecoveryChecking, setIsRecoveryChecking] = useState(false)
   const [timeTick, setTimeTick] = useState(() => Date.now())
   const [planeTick, setPlaneTick] = useState(() => Date.now())
+  const [activeFlightMeteoData, setActiveFlightMeteoData] = useState(null)
+  const [highlightedFlightId, setHighlightedFlightId] = useState('')
+  const [meteorologistRequestsCount, setMeteorologistRequestsCount] = useState(() => countMeteorologistRequests())
   const minDepartureAt = useMemo(() => getMinDepartureAtValue(timeTick), [timeTick])
   const isHelicopterMode = transportMode === TRANSPORT_MODE_HELICOPTER
 
@@ -1069,21 +1072,13 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
   const availableAirfields = useMemo(
     () =>
       allAirfields.filter((airport) => {
+        if (String(airport?.region ?? '').trim().toLowerCase() === 'казахстан') return false
         const isHeliPoint = String(airport?.id ?? '').endsWith('_HELI')
         return transportMode === TRANSPORT_MODE_HELICOPTER ? isHeliPoint : !isHeliPoint
       }),
     [allAirfields, transportMode],
   )
-  const selectableAirfields = useMemo(() => {
-    if (transportMode === TRANSPORT_MODE_HELICOPTER) {
-      return availableAirfields
-    }
-    if (airportScope === AIRPORT_SCOPE_PASSENGER) {
-      const passengerAirfields = availableAirfields.filter((airport) => isPassengerAirportCandidate(airport))
-      return passengerAirfields.length > 0 ? passengerAirfields : availableAirfields
-    }
-    return availableAirfields
-  }, [airportScope, availableAirfields, transportMode])
+  const selectableAirfields = useMemo(() => availableAirfields, [availableAirfields])
 
   const airportsById = useMemo(
     () => Object.fromEntries(availableAirfields.map((airport) => [airport.id, airport])),
@@ -1132,7 +1127,7 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
     const normalizedCity = normalizeSearchText(form.fromCity)
     if (!normalizedCity) return selectableAirfields
     return selectableAirfields.filter(
-      (airport) => normalizeSearchText(airport.city).includes(normalizedCity),
+      (airport) => normalizeSearchText(airport.city).startsWith(normalizedCity),
     )
   }, [form.fromCity, selectableAirfields])
 
@@ -1140,7 +1135,7 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
     const normalizedCity = normalizeSearchText(form.toCity)
     if (!normalizedCity) return selectableAirfields
     return selectableAirfields.filter(
-      (airport) => normalizeSearchText(airport.city).includes(normalizedCity),
+      (airport) => normalizeSearchText(airport.city).startsWith(normalizedCity),
     )
   }, [form.toCity, selectableAirfields])
 
@@ -1187,7 +1182,7 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
 
   const selectedWeatherAirport = selectedWeatherAirportId ? airportsById[selectedWeatherAirportId] : null
   const selectedWeather = selectedWeatherAirportId ? weatherByAirport[selectedWeatherAirportId]?.data : null
-  const isFallbackWeather = selectedWeather?.provider === 'synthetic-fallback'
+  const isFallbackWeather = String(selectedWeather?.provider ?? '').includes('fallback')
   const selectedStormWarning = useMemo(
     () => getStormWarning(selectedWeather),
     [selectedWeather],
@@ -1237,165 +1232,116 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
     [filteredFlights, timeTick],
   )
   const visibleFlights = useMemo(
-    () =>
-      showDepartedFlights
-        ? filteredFlights
-        : filteredFlights.filter((flight) => !isFlightDeparted(flight, timeTick)),
-    [filteredFlights, showDepartedFlights, timeTick],
+    () => {
+      const search = normalizeSearchText(flightFilters.search)
+      return filteredFlights
+        .filter((flight) => showDepartedFlights || !isFlightDeparted(flight, timeTick))
+        .filter((flight) => {
+          if (search && !normalizeSearchText(flight?.flightNumber).includes(search)) return false
+          if (flightFilters.risk !== 'ALL' && getRiskLevelFilterValue(flight?.totalRisk) !== flightFilters.risk) {
+            return false
+          }
+          if (
+            flightFilters.status !== 'ALL'
+            && (flight?.dispatcherDecision ?? DISPATCHER_DECISION_PENDING) !== flightFilters.status
+          ) {
+            return false
+          }
+          if (
+            flightFilters.airport !== 'ALL'
+            && flight?.fromAirportId !== flightFilters.airport
+            && flight?.toAirportId !== flightFilters.airport
+          ) {
+            return false
+          }
+          const departed = isFlightDeparted(flight, timeTick)
+          if (
+            flightFilters.departureTime !== 'ALL'
+            && !departed
+            && getDepartureFilterValue(flight, timeTick) !== flightFilters.departureTime
+          ) {
+            return false
+          }
+          return true
+        })
+    },
+    [filteredFlights, flightFilters, showDepartedFlights, timeTick],
   )
-  const icingAirportIds = useMemo(() => {
-    const uniqueAirportIds = new Set()
-    const addAirport = (airportId) => {
-      if (!airportId || uniqueAirportIds.size >= ICING_AIRPORTS_LIMIT) return
-      if (!allAirportsById[airportId]) return
-      uniqueAirportIds.add(airportId)
-    }
-
-    filteredFlights.forEach((flight) => {
-      if (isFlightDeparted(flight, timeTick)) return
-      addAirport(flight?.fromAirportId)
-      addAirport(flight?.toAirportId)
+  const pendingMeteoByFlightNumber = (() => {
+    const pending = {}
+    readMeteorologistChatLog().forEach((item) => {
+      if (item?.direction !== 'incoming') return
+      if (item?.messageType !== 'dispatcher_request') return
+      if (item?.isAnswered) return
+      const flightNumber = String(item?.flightNumber ?? '').trim()
+      if (!flightNumber) return
+      pending[flightNumber] = true
     })
-
-    addAirport(activeRoute?.from?.id)
-    addAirport(activeRoute?.to?.id)
-    addAirport(selectedWeatherAirportId)
-
-    if (uniqueAirportIds.size === 0) {
-      const fallbackSampleLimit = transportMode === TRANSPORT_MODE_HELICOPTER ? 28 : 56
-      const fallbackAirfields = availableAirfields.slice(0, fallbackSampleLimit)
-      fallbackAirfields.forEach((airfield) => addAirport(airfield?.id))
-    }
-
-    return Array.from(uniqueAirportIds)
-  }, [
-    activeRoute,
-    allAirportsById,
-    availableAirfields,
-    filteredFlights,
-    selectedWeatherAirportId,
-    timeTick,
-    transportMode,
-  ])
-
-  const riskHeatPoints = useMemo(() => {
-    const points = []
-    const nowTimestamp = Number(timeTick)
-
+    return pending
+  })()
+  const flightAirportFilterOptions = useMemo(() => {
+    const airportIds = new Set()
     filteredFlights.forEach((flight) => {
-      if (isFlightDeparted(flight, nowTimestamp)) return
-
-      const fromAirport = allAirportsById[flight?.fromAirportId]
-      const toAirport = allAirportsById[flight?.toAirportId]
-      if (!fromAirport || !toAirport) return
-
-      const departureScore = asNumberOrNull(flight?.departureRisk?.score ?? flight?.totalRisk)
-      const arrivalScore = asNumberOrNull(flight?.arrivalRisk?.score ?? flight?.totalRisk)
-
-      points.push({
-        id: `${flight.id}-dep`,
-        lat: fromAirport.lat,
-        lon: fromAirport.lon,
-        score: departureScore == null ? 0 : departureScore,
-        label: `Вылет ${flight.flightNumber}`,
-      })
-      points.push({
-        id: `${flight.id}-arr`,
-        lat: toAirport.lat,
-        lon: toAirport.lon,
-        score: arrivalScore == null ? 0 : arrivalScore,
-        label: `Посадка ${flight.flightNumber}`,
-      })
+      if (flight?.fromAirportId) airportIds.add(flight.fromAirportId)
+      if (flight?.toAirportId) airportIds.add(flight.toAirportId)
     })
-
-    if (points.length === 0) {
-      icingAirportIds.forEach((airportId) => {
-        const airport = allAirportsById[airportId]
-        const weather = weatherByAirport[airportId]?.data
-        if (!airport || !weather) return
-
-        const surfaceRisk = evaluateSurfaceRisk(weather)
-        points.push({
-          id: `wx-${airportId}`,
-          lat: airport.lat,
-          lon: airport.lon,
-          score: surfaceRisk.score,
-          label: `Погода ${airportId}`,
-        })
-      })
+    return [
+      { value: 'ALL', label: 'Все аэропорты' },
+      ...Array.from(airportIds)
+        .sort((left, right) => left.localeCompare(right))
+        .map((airportId) => {
+          const airport = allAirportsById[airportId]
+          return {
+            value: airportId,
+            label: airport ? getAirportDisplayName(airport) : airportId,
+          }
+        }),
+    ]
+  }, [allAirportsById, filteredFlights])
+  const flightSummary = useMemo(() => {
+    const activeFlights = filteredFlights.filter((flight) => !isFlightDeparted(flight, timeTick))
+    return {
+      critical: activeFlights.filter((flight) => asNumberOrNull(flight.totalRisk) != null && Number(flight.totalRisk) > 75).length,
+      awaitingData: activeFlights.filter((flight) => hasUrgentMissingRiskData(flight, timeTick)).length,
+      delayed: activeFlights.filter((flight) => flight.dispatcherDecision === DISPATCHER_DECISION_DELAY).length,
     }
+  }, [filteredFlights, timeTick])
+  const analytics = useMemo(() => {
+    void meteorologistRequestsCount
+    const modeFlightNumbers = new Set(
+      filteredFlights
+        .map((flight) => String(flight?.flightNumber ?? '').trim())
+        .filter(Boolean),
+    )
+    const meteorologistRequestsForMode = readMeteorologistChatLog().filter((item) => {
+      if (item?.direction !== 'incoming' || item?.messageType !== 'dispatcher_request') return false
+      const flightNumber = String(item?.flightNumber ?? '').trim()
+      return flightNumber && modeFlightNumbers.has(flightNumber)
+    }).length
+    const riskBuckets = FLIGHT_RISK_FILTERS.filter((item) => item.value !== 'ALL').map((item) => ({
+      ...item,
+      count: filteredFlights.filter((flight) => getRiskLevelFilterValue(flight?.totalRisk) === item.value).length,
+    }))
+    return {
+      riskBuckets,
+      delayed: filteredFlights.filter((flight) => flight.dispatcherDecision === DISPATCHER_DECISION_DELAY).length,
+      total: filteredFlights.length,
+      meteorologistRequests: meteorologistRequestsForMode,
+    }
+  }, [filteredFlights, meteorologistRequestsCount])
+  const weatherPieData = useMemo(() => {
+    const calm = analytics.riskBuckets.find((item) => item.value === 'LOW')?.count ?? 0
+    const warning = analytics.riskBuckets.find((item) => item.value === 'MEDIUM')?.count ?? 0
+    const severe = (analytics.riskBuckets.find((item) => item.value === 'HIGH')?.count ?? 0)
+      + (analytics.riskBuckets.find((item) => item.value === 'CRITICAL')?.count ?? 0)
+      + (analytics.riskBuckets.find((item) => item.value === 'NO_DATA')?.count ?? 0)
+    const total = Math.max(1, calm + warning + severe)
+    const calmPct = Math.round((calm / total) * 100)
+    const warningPct = Math.round((warning / total) * 100)
+    const severePct = 100 - calmPct - warningPct
+    return { calm, warning, severe, calmPct, warningPct, severePct, total }
+  }, [analytics.riskBuckets])
 
-    return points.slice(0, RISK_HEATMAP_MAX_POINTS)
-  }, [allAirportsById, filteredFlights, icingAirportIds, timeTick, weatherByAirport])
-
-  const icingHazardPoints = useMemo(
-    () =>
-      icingAirportIds
-        .map((airportId) => {
-          const airport = allAirportsById[airportId]
-          const weather = weatherByAirport[airportId]?.data
-          const hazard = getIcingHazard(weather)
-          if (!airport || !hazard) return null
-          return {
-            airportId,
-            airport,
-            hazard,
-          }
-        })
-        .filter(Boolean),
-    [allAirportsById, icingAirportIds, weatherByAirport],
-  )
-  const fogHazardPoints = useMemo(
-    () =>
-      icingAirportIds
-        .map((airportId) => {
-          const airport = allAirportsById[airportId]
-          const weather = weatherByAirport[airportId]?.data
-          const hazard = getFogHazard(weather)
-          if (!airport || !hazard) return null
-          return {
-            airportId,
-            airport,
-            hazard,
-          }
-        })
-        .filter(Boolean),
-    [allAirportsById, icingAirportIds, weatherByAirport],
-  )
-  const thunderHazardPoints = useMemo(
-    () =>
-      icingAirportIds
-        .map((airportId) => {
-          const airport = allAirportsById[airportId]
-          const weather = weatherByAirport[airportId]?.data
-          const hazard = getThunderHazard(weather)
-          if (!airport || !hazard) return null
-          return {
-            airportId,
-            airport,
-            hazard,
-          }
-        })
-        .filter(Boolean),
-    [allAirportsById, icingAirportIds, weatherByAirport],
-  )
-  const windHazardPoints = useMemo(
-    () =>
-      icingAirportIds
-        .map((airportId) => {
-          const airport = allAirportsById[airportId]
-          const weather = weatherByAirport[airportId]?.data
-          const hazard = getWindHazard(weather)
-          if (!airport || !hazard) return null
-          return {
-            airportId,
-            airport,
-            hazard,
-          }
-        })
-        .filter(Boolean),
-    [allAirportsById, icingAirportIds, weatherByAirport],
-  )
   useEffect(() => {
     recoveryModeRef.current = isRecoveryMode
   }, [isRecoveryMode])
@@ -1428,6 +1374,36 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
     },
     [activateRecoveryMode],
   )
+
+  const pushNotification = useCallback((type, title, message, key = `${type}:${title}:${message}`) => {
+    const now = Date.now()
+    const mutedUntil = notificationMutedUntilRef.current[key] ?? 0
+    if (mutedUntil > now) return
+
+    const lastShownAt = notificationLastShownAtRef.current[key] ?? 0
+    if (now - lastShownAt < 15000) return
+    notificationLastShownAtRef.current[key] = now
+
+    const id = `${type}-${now}-${Math.random().toString(16).slice(2)}`
+    setNotifications((prev) => {
+      const withoutSameKey = prev.filter((item) => item.key !== key)
+      return [
+        { id, key, type, title, message, createdAt: new Date().toISOString() },
+        ...withoutSameKey,
+      ].slice(0, 4)
+    })
+
+    window.setTimeout(() => {
+      setNotifications((prev) => prev.filter((item) => item.id !== id))
+    }, 9000)
+  }, [])
+
+  const dismissNotification = useCallback((id, key) => {
+    setNotifications((prev) => prev.filter((item) => item.id !== id))
+    if (key) {
+      notificationMutedUntilRef.current[key] = Date.now() + 30000
+    }
+  }, [])
 
   const checkRecoveryNow = useCallback(async () => {
     setIsRecoveryChecking(true)
@@ -1480,6 +1456,7 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
   }, [deactivateRecoveryMode, parseBackendFailure])
 
   const checkMeteorologistUpdates = useCallback(() => {
+    setMeteorologistRequestsCount(countMeteorologistRequests())
     const newResponses = readNewMeteorologistResponsesForDispatcher()
     if (!Array.isArray(newResponses) || newResponses.length === 0) return
 
@@ -1498,8 +1475,19 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
       flightNumber,
       count: newResponses.length,
       createdAt: newestResponse.createdAt || new Date().toISOString(),
+      responseComplete: newestResponse.requestSnapshot?.responseComplete !== false,
+      emptyFieldsCount: Number(newestResponse.requestSnapshot?.emptyFieldsCount ?? 0),
     })
-  }, [])
+
+    // Обновляем метеоданные активного рейса если это его ответ
+    if (activeFlight && newestResponse.requestSnapshot?.form?.flightNumber === activeFlight.flightNumber) {
+      setActiveFlightMeteoData({
+        responseComplete: newestResponse.requestSnapshot?.responseComplete,
+        responseByNeed: newestResponse.requestSnapshot?.responseByNeed,
+        needs: newestResponse.requestSnapshot?.needs,
+      })
+    }
+  }, [activeFlight])
 
   useEffect(() => {
     checkMeteorologistUpdates()
@@ -1615,6 +1603,28 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
   }, [deactivateRecoveryMode, parseBackendFailure])
 
   useEffect(() => {
+    if (isRecoveryMode) return undefined
+
+    const intervalId = setInterval(async () => {
+      try {
+        const flights = await fetchAllFlights()
+        setFlightsError('')
+        setAllFlights((prev) =>
+          hydrateFlightsWithRiskTimestamps(
+            Array.isArray(flights) ? flights : [],
+            prev,
+            new Date().toISOString(),
+          ),
+        )
+      } catch {
+        // Keep current list visible; major connectivity issues are handled elsewhere.
+      }
+    }, FLIGHTS_POLL_INTERVAL_MS)
+
+    return () => clearInterval(intervalId)
+  }, [isRecoveryMode])
+
+  useEffect(() => {
     let cancelled = false
 
     loadLeafletAssets()
@@ -1654,11 +1664,6 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
 
     setTimeout(() => map.invalidateSize(), 0)
 
-    heatLayerRef.current = L.layerGroup().addTo(map)
-    icingLayerRef.current = L.layerGroup().addTo(map)
-    fogLayerRef.current = L.layerGroup().addTo(map)
-    thunderLayerRef.current = L.layerGroup().addTo(map)
-    windLayerRef.current = L.layerGroup().addTo(map)
     airportLayerRef.current = L.layerGroup().addTo(map)
     routeLayerRef.current = L.layerGroup().addTo(map)
     planeLayerRef.current = L.layerGroup().addTo(map)
@@ -1667,11 +1672,6 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
     return () => {
       map.remove()
       mapRef.current = null
-      heatLayerRef.current = null
-      icingLayerRef.current = null
-      fogLayerRef.current = null
-      thunderLayerRef.current = null
-      windLayerRef.current = null
       airportLayerRef.current = null
       routeLayerRef.current = null
       planeLayerRef.current = null
@@ -1703,6 +1703,14 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
       }
 
       const data = await fetchWeatherByAirport(airport)
+      if (String(data?.provider ?? '').includes('fallback')) {
+        pushNotification(
+          'api',
+          'API недоступен',
+          'Основной погодный API не ответил, использован резервный источник данных.',
+          'api-fallback-weather',
+        )
+      }
       setWeatherByAirport((prev) => ({
         ...prev,
         [airportId]: { data, fetchedAt: new Date().toISOString() },
@@ -1710,7 +1718,7 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
 
       return data
     },
-    [airportsById],
+    [airportsById, pushNotification],
   )
 
   const openAirportWeather = useCallback(
@@ -1797,6 +1805,26 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
       { airport: activeRoute.from, role: 'from', label: 'Вылет' },
       { airport: activeRoute.to, role: 'to', label: 'Прилет' },
     ].forEach(({ airport, role, label }) => {
+      const weather = weatherByAirport[airport.id]?.data
+      const wind = weather ? `${Math.round(safeNumber(weather.wind?.speed, 0))} м/с` : 'нет данных'
+      const visibility = weather ? `${(safeNumber(weather.visibility, 0) / 1000).toFixed(1)} км` : 'нет данных'
+      const surfaceRisk = weather ? Math.round(evaluateSurfaceRisk(weather).score) : null
+      const riskLevel = surfaceRisk == null
+        ? 'NO DATA'
+        : surfaceRisk > 75
+        ? 'HIGH'
+        : surfaceRisk > 55
+        ? 'MEDIUM'
+        : 'LOW'
+      const hoverDetails = `
+        <div>
+          <div><strong>${getAirportDisplayName(airport)}</strong></div>
+          <div>Ветер: ${wind}</div>
+          <div>Видимость: ${visibility}</div>
+          <div>Риск: ${riskLevel}</div>
+        </div>
+      `
+
       const marker = L.marker([airport.lat, airport.lon], {
         icon: L.divIcon({
           className: 'route-endpoint-wrapper',
@@ -1815,7 +1843,15 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
         .on('click', () => {
           openAirportWeather(airport.id)
         })
-        .bindTooltip(`${label}: ${airport.id} - ${airport.name}`, {
+        .bindPopup(hoverDetails, {
+          closeButton: false,
+          autoClose: false,
+          className: `route-endpoint-tooltip route-endpoint-tooltip--${role}`,
+          offset: [0, -8],
+        })
+        .on('mouseover', () => marker.openPopup())
+        .on('mouseout', () => marker.closePopup())
+        .bindTooltip(`${label}: ${getAirportDisplayName(airport)}`, {
           direction: 'top',
           permanent: true,
           offset: [0, -26],
@@ -1823,244 +1859,9 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
         })
         .addTo(layer)
     })
-  }, [activeRoute, openAirportWeather])
+  }, [activeRoute, openAirportWeather, weatherByAirport])
 
-  useEffect(() => {
-    if (!mapRef.current || !heatLayerRef.current) return
 
-    const L = window.L
-    const layer = heatLayerRef.current
-    layer.clearLayers()
-
-    if (!showRiskHeatmap || riskHeatPoints.length === 0) return
-
-    riskHeatPoints.forEach((point) => {
-      const safeScore = clampScore(point.score ?? 0)
-      const radiusMeters = isHelicopterMode
-        ? 1800 + safeScore * 130
-        : 18000 + safeScore * 1700
-
-      L.circle([point.lat, point.lon], {
-        radius: radiusMeters,
-        color: getRiskHeatColor(safeScore),
-        weight: 1,
-        opacity: 0.42,
-        fillColor: getRiskHeatColor(safeScore),
-        fillOpacity: 0.14 + safeScore * 0.0032,
-      })
-        .bindTooltip(`${point.label}: ${safeScore}/100`, { direction: 'top', sticky: true })
-        .addTo(layer)
-    })
-  }, [isHelicopterMode, riskHeatPoints, showRiskHeatmap])
-
-  useEffect(() => {
-    const hasAnyHazardLayerEnabled =
-      showIcingLayer || showFogLayer || showThunderLayer || showWindLayer
-    if (activeTab !== 'monitoring' || !hasAnyHazardLayerEnabled) return undefined
-
-    const idsToLoad = icingAirportIds.filter((airportId) => {
-      const cached = weatherCacheRef.current[airportId]
-      return !isWeatherCacheFresh(cached)
-    })
-    if (idsToLoad.length === 0) return undefined
-
-    let cancelled = false
-    const chunk = idsToLoad.slice(0, ICING_WEATHER_LOAD_LIMIT)
-
-    Promise.all(
-      chunk.map(async (airportId) => {
-        if (cancelled) return
-        try {
-          await ensureWeather(airportId)
-        } catch {
-          // icing overlay is optional: ignore per-point weather failures
-        }
-      }),
-    ).catch(() => {
-      // keep UI responsive even if part of requests failed
-    })
-
-    return () => {
-      cancelled = true
-    }
-  }, [
-    activeTab,
-    ensureWeather,
-    icingAirportIds,
-    showFogLayer,
-    showIcingLayer,
-    showThunderLayer,
-    showWindLayer,
-    weatherByAirport,
-  ])
-
-  useEffect(() => {
-    if (!mapRef.current || !icingLayerRef.current) return
-
-    const L = window.L
-    const layer = icingLayerRef.current
-    layer.clearLayers()
-
-    if (!showIcingLayer || icingHazardPoints.length === 0) return
-
-    icingHazardPoints.forEach((point) => {
-      const color = getIcingColor(point.hazard.level)
-      const score = clampScore(point.hazard.score ?? 0)
-      const zoneRadius = isHelicopterMode
-        ? 2200 + score * 90
-        : 14000 + score * 820
-
-      L.circle([point.airport.lat, point.airport.lon], {
-        radius: zoneRadius,
-        color,
-        weight: 1.2,
-        opacity: 0.3,
-        fillColor: color,
-        fillOpacity: 0.08 + score * 0.0022,
-      }).addTo(layer)
-
-      L.circleMarker([point.airport.lat, point.airport.lon], {
-        radius: 6 + Math.round(score / 16),
-        color,
-        weight: 2,
-        fillColor: color,
-        fillOpacity: 0.9,
-      })
-        .bindTooltip(
-          `${point.airport.id}: ${point.hazard.title} (${score}/100)${
-            point.hazard.reasons.length ? `; ${point.hazard.reasons.join('; ')}` : ''
-          }`,
-          { direction: 'top', sticky: true },
-        )
-        .addTo(layer)
-    })
-  }, [icingHazardPoints, isHelicopterMode, showIcingLayer])
-
-  useEffect(() => {
-    if (!mapRef.current || !fogLayerRef.current) return
-
-    const L = window.L
-    const layer = fogLayerRef.current
-    layer.clearLayers()
-
-    if (!showFogLayer || fogHazardPoints.length === 0) return
-
-    fogHazardPoints.forEach((point) => {
-      const color = getFogColor(point.hazard.level)
-      const score = clampScore(point.hazard.score ?? 0)
-      const zoneRadius = isHelicopterMode
-        ? 2000 + score * 90
-        : 12000 + score * 650
-
-      L.circle([point.airport.lat, point.airport.lon], {
-        radius: zoneRadius,
-        color,
-        weight: 1.1,
-        opacity: 0.28,
-        fillColor: color,
-        fillOpacity: 0.09 + score * 0.002,
-      }).addTo(layer)
-
-      L.circleMarker([point.airport.lat, point.airport.lon], {
-        radius: 5 + Math.round(score / 20),
-        color,
-        weight: 2,
-        fillColor: color,
-        fillOpacity: 0.88,
-      })
-        .bindTooltip(
-          `${point.airport.id}: ${point.hazard.title} (${score}/100)${
-            point.hazard.reasons.length ? `; ${point.hazard.reasons.join('; ')}` : ''
-          }`,
-          { direction: 'top', sticky: true },
-        )
-        .addTo(layer)
-    })
-  }, [fogHazardPoints, isHelicopterMode, showFogLayer])
-
-  useEffect(() => {
-    if (!mapRef.current || !thunderLayerRef.current) return
-
-    const L = window.L
-    const layer = thunderLayerRef.current
-    layer.clearLayers()
-
-    if (!showThunderLayer || thunderHazardPoints.length === 0) return
-
-    thunderHazardPoints.forEach((point) => {
-      const color = getThunderColor(point.hazard.level)
-      const score = clampScore(point.hazard.score ?? 0)
-      const zoneRadius = isHelicopterMode
-        ? 2300 + score * 100
-        : 13000 + score * 760
-
-      L.circle([point.airport.lat, point.airport.lon], {
-        radius: zoneRadius,
-        color,
-        weight: 1.1,
-        opacity: 0.3,
-        fillColor: color,
-        fillOpacity: 0.1 + score * 0.0022,
-      }).addTo(layer)
-
-      L.circleMarker([point.airport.lat, point.airport.lon], {
-        radius: 5 + Math.round(score / 18),
-        color,
-        weight: 2,
-        fillColor: color,
-        fillOpacity: 0.9,
-      })
-        .bindTooltip(
-          `${point.airport.id}: ${point.hazard.title} (${score}/100)${
-            point.hazard.reasons.length ? `; ${point.hazard.reasons.join('; ')}` : ''
-          }`,
-          { direction: 'top', sticky: true },
-        )
-        .addTo(layer)
-    })
-  }, [isHelicopterMode, showThunderLayer, thunderHazardPoints])
-
-  useEffect(() => {
-    if (!mapRef.current || !windLayerRef.current) return
-
-    const L = window.L
-    const layer = windLayerRef.current
-    layer.clearLayers()
-
-    if (!showWindLayer || windHazardPoints.length === 0) return
-
-    windHazardPoints.forEach((point) => {
-      const color = getWindColor(point.hazard.level)
-      const score = clampScore(point.hazard.score ?? 0)
-      const zoneRadius = isHelicopterMode
-        ? 2100 + score * 95
-        : 12500 + score * 700
-
-      L.circle([point.airport.lat, point.airport.lon], {
-        radius: zoneRadius,
-        color,
-        weight: 1.1,
-        opacity: 0.28,
-        fillColor: color,
-        fillOpacity: 0.09 + score * 0.0021,
-      }).addTo(layer)
-
-      L.circleMarker([point.airport.lat, point.airport.lon], {
-        radius: 5 + Math.round(score / 20),
-        color,
-        weight: 2,
-        fillColor: color,
-        fillOpacity: 0.9,
-      })
-        .bindTooltip(
-          `${point.airport.id}: ${point.hazard.title} (${score}/100)${
-            point.hazard.reasons.length ? `; ${point.hazard.reasons.join('; ')}` : ''
-          }`,
-          { direction: 'top', sticky: true },
-        )
-        .addTo(layer)
-    })
-  }, [isHelicopterMode, showWindLayer, windHazardPoints])
 
   useEffect(() => {
     if (!mapRef.current || !routeLayerRef.current) return
@@ -2244,14 +2045,16 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
         temporalRisk: savedFlight?.temporalRisk ?? scenarioAdjustedRisk?.temporal,
       }
 
-      setActiveFlight(savedFlightWithTemporal)
       setAllFlights((prev) => {
         const nowIso = new Date().toISOString()
         const hydratedSaved = withRiskTimestamp(savedFlightWithTemporal, mapFlightsById(prev), nowIso)
         return [hydratedSaved, ...prev.filter((flight) => flight.id !== savedFlight.id)]
       })
-      setSelectedWeatherAirportId(selectedFrom.id)
+      setActiveFlight(null)
+      setSelectedWeatherAirportId('')
       setForm(createInitialForm(Date.now(), transportMode))
+      setPreviewRisk(null)
+      setError('')
       setActiveTab('monitoring')
     } catch (cause) {
       const failure = parseBackendFailure(cause, 'Не удалось создать рейс. Проверьте backend и доступ к погодному API.')
@@ -2267,6 +2070,11 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
     setActiveFlight(flight)
     setSelectedWeatherAirportId(flight.fromAirportId)
     setActiveTab('monitoring')
+  }, [])
+
+  const openHistoryModal = useCallback((flight) => {
+    if (!flight?.id) return
+    setHistoryFlight(flight)
   }, [])
 
   const setFlightActionPending = useCallback((flightId, action, pending) => {
@@ -2306,6 +2114,10 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
         const refreshedFlight = await refreshFlightRiskApi(flightId)
         deactivateRecoveryMode()
         updateFlightInState(refreshedFlight)
+        if (historyFlight?.id === flightId) {
+          const history = await fetchFlightHistory(flightId)
+          setHistoryModalItems(Array.isArray(history) ? history : [])
+        }
       } catch (cause) {
         const failure = parseBackendFailure(cause, 'Не удалось обновить риск по рейсу.')
         setFlightActionError(
@@ -2315,7 +2127,7 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
         setFlightActionPending(flightId, 'refresh', false)
       }
     },
-    [deactivateRecoveryMode, parseBackendFailure, setFlightActionPending, updateFlightInState],
+    [deactivateRecoveryMode, historyFlight?.id, parseBackendFailure, setFlightActionPending, updateFlightInState],
   )
 
   const handleCancelFlight = useCallback(
@@ -2390,13 +2202,11 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
 
   const runDelayWhatIf = useCallback(async () => {
     if (!decisionFlight?.id) return
-
     const delayMinutes = Number(decisionForm.delayMinutes)
     if (!Number.isInteger(delayMinutes) || delayMinutes < 5) {
       setDecisionError('Для what-if укажите задержку от 5 минут.')
       return
     }
-
     setDecisionError('')
     setIsDecisionWhatIfLoading(true)
     try {
@@ -2413,7 +2223,6 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
 
   const applyDecision = useCallback(async () => {
     if (!decisionFlight?.id) return
-
     const reason = decisionForm.reason.trim()
     if (!reason) {
       setDecisionError('Добавьте объяснение решения диспетчера.')
@@ -2441,6 +2250,10 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
       })
       deactivateRecoveryMode()
       updateFlightInState(updatedFlight)
+      if (historyFlight?.id === decisionFlight.id) {
+        const history = await fetchFlightHistory(decisionFlight.id)
+        setHistoryModalItems(Array.isArray(history) ? history : [])
+      }
       closeDecisionModal()
     } catch (cause) {
       const failure = parseBackendFailure(cause, 'Не удалось применить решение диспетчера.')
@@ -2454,6 +2267,7 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
     decisionFlight?.id,
     decisionForm,
     deactivateRecoveryMode,
+    historyFlight?.id,
     parseBackendFailure,
     setFlightActionPending,
     updateFlightInState,
@@ -2694,11 +2508,91 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
     return () => clearTimeout(timer)
   }, [activeTab])
 
+  useEffect(() => {
+    if (!highlightedFlightId || activeTab !== 'flights') return undefined
+    const timer = window.setTimeout(() => setHighlightedFlightId(''), 3000)
+    return () => window.clearTimeout(timer)
+  }, [activeTab, highlightedFlightId])
+
   const displayedRisk = activeRisk ?? previewRisk
-  const effectiveRisk = useMemo(
-    () => safeApplyEmergencyRisk(displayedRisk, emergencyScenario),
-    [displayedRisk, emergencyScenario],
+  const adjustedDisplayedRisk = useMemo(
+    () => applyMeteoDataRiskAdjustment(displayedRisk, activeFlightMeteoData),
+    [displayedRisk, activeFlightMeteoData],
   )
+  const effectiveRisk = useMemo(
+    () => safeApplyEmergencyRisk(adjustedDisplayedRisk, emergencyScenario),
+    [adjustedDisplayedRisk, emergencyScenario],
+  )
+
+  // Очищаем метеоданные когда меняется активный рейс
+  useEffect(() => {
+    if (!activeFlight) {
+      setActiveFlightMeteoData(null)
+    }
+  }, [activeFlight])
+
+  useEffect(() => {
+    if (!activeFlight?.id) {
+      setActiveFlightHistory([])
+      setActiveFlightHistoryError('')
+      setIsActiveFlightHistoryLoading(false)
+      return undefined
+    }
+
+    let cancelled = false
+    setIsActiveFlightHistoryLoading(true)
+    setActiveFlightHistoryError('')
+
+    fetchFlightHistory(activeFlight.id)
+      .then((history) => {
+        if (!cancelled) setActiveFlightHistory(Array.isArray(history) ? history : [])
+      })
+      .catch((cause) => {
+        if (cancelled) return
+        const failure = parseBackendFailure(cause, 'Не удалось загрузить историю пересчетов риска.')
+        setActiveFlightHistory([])
+        setActiveFlightHistoryError(failure.message)
+      })
+      .finally(() => {
+        if (!cancelled) setIsActiveFlightHistoryLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeFlight?.id, parseBackendFailure])
+
+  useEffect(() => {
+    if (!historyFlight?.id) {
+      setHistoryModalItems([])
+      setHistoryModalError('')
+      setIsHistoryModalLoading(false)
+      return undefined
+    }
+
+    let cancelled = false
+    setIsHistoryModalLoading(true)
+    setHistoryModalError('')
+
+    fetchFlightHistory(historyFlight.id)
+      .then((history) => {
+        if (!cancelled) setHistoryModalItems(Array.isArray(history) ? history : [])
+      })
+      .catch((cause) => {
+        if (cancelled) return
+        const failure = parseBackendFailure(cause, 'Не удалось загрузить историю рейса.')
+        setHistoryModalItems([])
+        setHistoryModalError(failure.message)
+      })
+      .finally(() => {
+        if (!cancelled) setIsHistoryModalLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [historyFlight?.id, parseBackendFailure])
+
   const recommendationRouteAirportIds = useMemo(() => {
     if (activeFlight?.fromAirportId && activeFlight?.toAirportId) {
       return [activeFlight.fromAirportId, activeFlight.toAirportId]
@@ -2717,7 +2611,7 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
 
     return !hasWeatherPayload(fromWeather) || !hasWeatherPayload(toWeather)
   }, [recommendationRouteAirportIds, weatherByAirport])
-  const systemRecommendations = useMemo(
+  const baseSystemRecommendations = useMemo(
     () =>
       safeBuildRecommendations({
         risk: effectiveRisk,
@@ -2727,25 +2621,179 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
       }),
     [effectiveRisk, emergencyScenario, needsMeteoRequest, selectedStormWarning],
   )
+  const automaticRecommendationCode = useMemo(
+    () => getAutomaticRecommendationCode(effectiveRisk?.total),
+    [effectiveRisk?.total],
+  )
+  const systemRecommendations = useMemo(
+    () => prioritizeRecommendation(baseSystemRecommendations, automaticRecommendationCode),
+    [automaticRecommendationCode, baseSystemRecommendations],
+  )
+  const riskForecast = useMemo(() => {
+    const departureAt = activeFlight?.departureAt ?? form.departureAt
+    return buildRiskForecast(effectiveRisk, selectedWeather, departureAt, isHelicopterMode)
+  }, [activeFlight?.departureAt, effectiveRisk, form.departureAt, isHelicopterMode, selectedWeather])
+
+  useEffect(() => {
+    if (!effectiveRisk || systemRecommendations.length === 0) return
+
+    const currentTop = systemRecommendations[0]
+    const currentCategory = getRecommendationCategory(currentTop.code)
+    const previousCategory = previousRecommendationRef.current?.category
+    const previousRisk = previousRiskRef.current
+    const currentRisk = safeNumber(effectiveRisk.total)
+    const riskRaised = previousRisk != null && currentRisk >= previousRisk + 5
+
+    if (riskRaised) {
+      pushNotification(
+        'risk',
+        'Риск повышен',
+        `Итоговый риск вырос с ${previousRisk}/100 до ${currentRisk}/100.`,
+        `risk-up-${activeFlight?.id ?? 'preview'}`,
+      )
+    }
+
+    const approveToDelay = previousCategory === 'APPROVE' && currentCategory === 'DELAY'
+    const delayToCancel = previousCategory === 'DELAY' && currentCategory === 'CANCEL'
+    if (riskRaised && (approveToDelay || delayToCancel)) {
+      const notice = {
+        from: previousRecommendationRef.current.title,
+        to: currentTop.title,
+        createdAt: new Date().toISOString(),
+      }
+      setAutoRecommendationNotice(notice)
+      pushNotification(
+        'recommendation',
+        'Рекомендация изменена автоматически',
+        `${notice.from} → ${notice.to}`,
+        `recommendation-change-${activeFlight?.id ?? 'preview'}`,
+      )
+    }
+
+    previousRecommendationRef.current = {
+      code: currentTop.code,
+      title: currentTop.title,
+      category: currentCategory,
+    }
+    previousRiskRef.current = currentRisk
+  }, [activeFlight?.id, effectiveRisk, pushNotification, systemRecommendations])
+
+  useEffect(() => {
+    const activeFlights = filteredFlights.filter((flight) => !isFlightDeparted(flight, timeTick))
+    const staleFlight = activeFlights.find((flight) => needsUrgentWeatherUpdate(flight, timeTick))
+    if (staleFlight) {
+      pushNotification(
+        'stale',
+        'Данные устарели',
+        `Рейс ${staleFlight.flightNumber}: до вылета меньше 3 часов, нужен свежий расчет.`,
+        `stale-${staleFlight.id}`,
+      )
+    }
+
+    const decisionRequired = activeFlights.find((flight) => {
+      const decision = flight?.dispatcherDecision ?? DISPATCHER_DECISION_PENDING
+      const risk = asNumberOrNull(flight?.totalRisk)
+      return decision === DISPATCHER_DECISION_PENDING && risk != null && risk > 55
+    })
+    if (decisionRequired) {
+      pushNotification(
+        'decision',
+        'Требуется решение диспетчера',
+        `Рейс ${decisionRequired.flightNumber}: риск ${decisionRequired.totalRisk}/100.`,
+        `decision-${decisionRequired.id}`,
+      )
+    }
+  }, [filteredFlights, pushNotification, timeTick])
+
+  useEffect(() => {
+    visibleFlights.forEach((flight) => {
+      if (!flight?.id) return
+      const isUrgentMissing = hasUrgentMissingRiskData(flight, timeTick) || needsUrgentWeatherUpdate(flight, timeTick)
+      if (!isUrgentMissing) return
+
+      const flightNumber = String(flight?.flightNumber ?? '').trim()
+      if (!flightNumber) return
+      if (pendingMeteoByFlightNumber[flightNumber]) return
+      if (urgentMeteoRequestedFlightsRef.current.has(flight.id)) return
+
+      const requestPayload = {
+        id: `auto-urgent-${flight.id}-${Date.now()}`,
+        createdAt: new Date().toISOString(),
+        status: 'new',
+        dispatcherName: 'Диспетчер рейсов',
+        form: {
+          flightNumber,
+          fromAirportId: flight.fromAirportId ?? '',
+          toAirportId: flight.toAirportId ?? '',
+          etd: toDateTimeLocalValue(flight.departureAt),
+          eta: toDateTimeLocalValue(getFlightArrivalForTable(flight)),
+          dispatcherComment: 'Автоматический срочный запрос: до вылета менее 3 часов.',
+        },
+        needs: DEFAULT_METEOROLOGIST_NEEDS,
+        requestText: 'Автоматический срочный запрос метеоданных',
+        dataComplete: false,
+      }
+
+      saveActiveMeteorologistRequest(requestPayload)
+      urgentMeteoRequestedFlightsRef.current.add(flight.id)
+      pushNotification(
+        'urgent-meteo',
+        'Срочный запрос метеорологу',
+        `Рейс ${flightNumber}: до вылета менее 3 часов, отправлен автоматический запрос.`,
+        `urgent-meteo-${flight.id}`,
+      )
+    })
+  }, [getFlightArrivalForTable, pendingMeteoByFlightNumber, pushNotification, timeTick, visibleFlights])
   return (
     <Stack className="dispatcher-app" gap="md">
+      {notifications.length > 0 && (
+        <Stack gap="xs" className="notification-stack">
+          {notifications.map((item) => (
+            <Alert
+              key={item.id}
+              color={
+                item.type === 'api'
+                  ? 'red'
+                  : item.type === 'risk' || item.type === 'recommendation'
+                  ? 'orange'
+                  : item.type === 'decision'
+                  ? 'yellow'
+                  : 'blue'
+              }
+              radius="md"
+              icon={<IconAlertTriangle size={16} />}
+              withCloseButton
+              onClose={() => dismissNotification(item.id, item.key)}
+              title={item.title}
+            >
+              <Text size="sm">{item.message}</Text>
+            </Alert>
+          ))}
+        </Stack>
+      )}
+
       <Paper withBorder radius="xl" p="md" className="surface-card surface-card--tabs">
         <Stack gap="sm">
           <Group justify="space-between" gap="md" wrap="wrap">
-            <Group gap="xs" wrap="wrap">
-              <Title order={3}>Панель диспетчера</Title>
-              <Badge variant="light" color={isRecoveryMode ? 'orange' : 'teal'}>
-                {isRecoveryMode ? 'RECOVERY MODE' : 'LIVE'}
-              </Badge>
-            </Group>
+            <Title order={3}>Панель диспетчера</Title>
             <SegmentedControl
               radius="xl"
               size="md"
               value={activeTab}
-              onChange={setActiveTab}
+              onChange={(nextTab) => {
+                setActiveTab(nextTab)
+                if (nextTab === 'flights') {
+                  window.location.hash = '/?tab=flights'
+                } else if (nextTab === 'analytics') {
+                  window.location.hash = '/?tab=analytics'
+                } else {
+                  window.location.hash = '/'
+                }
+              }}
               data={[
                 { value: 'monitoring', label: 'Мониторинг' },
                 { value: 'flights', label: 'Рейсы' },
+                { value: 'analytics', label: 'Аналитика' },
               ]}
             />
           </Group>
@@ -2824,6 +2872,11 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
             <Text size="sm">
               Данные по рейсу <strong>{meteorologistUpdateNotice.flightNumber}</strong> поменялись. Проверьте риск.
             </Text>
+            {!meteorologistUpdateNotice.responseComplete && (
+              <Text size="sm" c="red">
+                Метеоролог отправил неполные данные{meteorologistUpdateNotice.emptyFieldsCount > 0 ? ` (${meteorologistUpdateNotice.emptyFieldsCount} незаполн.)` : ''}.
+              </Text>
+            )}
             {meteorologistUpdateNotice.count > 1 && (
               <Text size="xs" c="dimmed">
                 Также есть еще обновлений: {meteorologistUpdateNotice.count - 1}.
@@ -2836,12 +2889,37 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
                 variant="light"
                 onClick={() => {
                   setActiveTab('flights')
+                  const flight = allFlights.find((item) => item.flightNumber === meteorologistUpdateNotice.flightNumber)
+                  if (flight?.id) {
+                    setHighlightedFlightId(flight.id)
+                  }
                   setMeteorologistUpdateNotice(null)
                 }}
               >
                 Перейти к рейсам
               </Button>
             </Group>
+          </Stack>
+        </Alert>
+      )}
+
+      {activeFlightMeteoData && !activeFlightMeteoData.responseComplete && (
+        <Alert
+          color="orange"
+          radius="md"
+          variant="light"
+          icon={<IconAlertTriangle size={18} />}
+          title="Неполные метеоданные"
+          withCloseButton
+          onClose={() => setActiveFlightMeteoData(null)}
+        >
+          <Stack gap={4}>
+            <Text size="sm">
+              Метеоролог заполнил не все требуемые данные. Риск рассчитывается с повышенным коэффициентом для безопасности.
+            </Text>
+            <Text size="xs" c="dimmed">
+              Решение о полете принимается за диспетчером с учетом неполной информации.
+            </Text>
           </Stack>
         </Alert>
       )}
@@ -2854,25 +2932,27 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
                 <Stack gap="md">
                   <Group justify="space-between" align="flex-start">
                     <Title order={4}>Создание рейса</Title>
-                    <Badge variant="light" color="teal">
-                      live risk
-                    </Badge>
                   </Group>
 
-                  {transportMode === TRANSPORT_MODE_AIRPLANE && (
-                    <Group justify="space-between" align="center" wrap="wrap" gap="xs">
-                      <Text size="xs" c="dimmed">Показывать аэропорты</Text>
-                      <SegmentedControl
-                        size="xs"
-                        radius="xl"
-                        value={airportScope}
-                        onChange={setAirportScope}
-                        data={[
-                          { value: AIRPORT_SCOPE_PASSENGER, label: 'Пассажирские' },
-                          { value: AIRPORT_SCOPE_ALL, label: 'Все' },
-                        ]}
-                      />
+                  {effectiveRisk ? (
+                    <Group spacing="xs" wrap="wrap" style={{ marginBottom: 8 }}>
+                      <Badge color={getRiskBadgeColor(effectiveRisk.total)} variant="filled">
+                        Итого {formatRiskBadgeScore(effectiveRisk.total)}
+                      </Badge>
+                      <Badge color={getRiskBadgeColor(effectiveRisk.departure?.score)} variant="outline">
+                        Взлет {formatRiskBadgeScore(effectiveRisk.departure?.score)}
+                      </Badge>
+                      <Badge color={getRiskBadgeColor(effectiveRisk.arrival?.score)} variant="outline">
+                        Посадка {formatRiskBadgeScore(effectiveRisk.arrival?.score)}
+                      </Badge>
+                      <Badge color={getRiskBadgeColor(effectiveRisk.cruise?.score)} variant="outline">
+                        Маршрут {formatRiskBadgeScore(effectiveRisk.cruise?.score)}
+                      </Badge>
                     </Group>
+                  ) : (
+                    <Text size="sm" c="dimmed">
+                      Маркеры риска появятся после выбора маршрута и времени вылета.
+                    </Text>
                   )}
 
                   <div className="form-grid">
@@ -2933,12 +3013,8 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
                       {fromAirportOptions.map((airport) => (
                         <option key={airport.id} value={airport.id}>
                           {isHelicopterMode
-                            ? `${airport.name} (${airport.city})`
-                            : `${airport.id} - ${airport.name}${
-                                airportScope === AIRPORT_SCOPE_ALL
-                                  ? (isPassengerAirportCandidate(airport) ? ' [пасс.]' : ' [проч.]')
-                                  : ''
-                              }`}
+                            ? `${String(airport.name || airport.city || airport.id)} (${String(airport.city || 'без города')})`
+                            : getAirportDisplayName(airport)}
                         </option>
                       ))}
                     </NativeSelect>
@@ -2962,12 +3038,8 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
                       {toAirportOptions.map((airport) => (
                         <option key={airport.id} value={airport.id}>
                           {isHelicopterMode
-                            ? `${airport.name} (${airport.city})`
-                            : `${airport.id} - ${airport.name}${
-                                airportScope === AIRPORT_SCOPE_ALL
-                                  ? (isPassengerAirportCandidate(airport) ? ' [пасс.]' : ' [проч.]')
-                                  : ''
-                              }`}
+                            ? `${String(airport.name || airport.city || airport.id)} (${String(airport.city || 'без города')})`
+                            : getAirportDisplayName(airport)}
                         </option>
                       ))}
                     </NativeSelect>
@@ -3042,6 +3114,19 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
                   <Title order={5}>Рейтинг рекомендаций системы</Title>
                   {effectiveRisk ? (
                     <>
+                      {autoRecommendationNotice && (
+                        <Alert
+                          color="orange"
+                          radius="md"
+                          variant="light"
+                          icon={<IconAlertTriangle size={16} />}
+                          withCloseButton
+                          onClose={() => setAutoRecommendationNotice(null)}
+                          title="Рекомендация изменена автоматически"
+                        >
+                          {autoRecommendationNotice.from} → {autoRecommendationNotice.to}
+                        </Alert>
+                      )}
                       {systemRecommendations.slice(0, 5).map((item, index) => (
                         <Stack key={item.code} gap={4}>
                           <Group justify="space-between" align="center">
@@ -3097,67 +3182,6 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
                         <span>{item.label}</span>
                       </div>
                     ))}
-                  </div>
-                  <div className="map-layer-controls">
-                    <div className="layer-switch-item layer-switch-item--heat">
-                      <Group align="center" wrap="nowrap" gap={6}>
-                        <Switch
-                          size="xs"
-                          color="teal"
-                          checked={showRiskHeatmap}
-                          onChange={(event) => setShowRiskHeatmap(Boolean(event.currentTarget.checked))}
-                        />
-                        <Text size="xs" fw={600} className="layer-switch-label">Теплокарта</Text>
-                      </Group>
-                    </div>
-
-                    <div className="layer-switch-item layer-switch-item--icing">
-                      <Group align="center" wrap="nowrap" gap={6}>
-                        <Switch
-                          size="xs"
-                          color="blue"
-                          checked={showIcingLayer}
-                          onChange={(event) => setShowIcingLayer(Boolean(event.currentTarget.checked))}
-                        />
-                        <Text size="xs" fw={600} className="layer-switch-label">Оледенение</Text>
-                      </Group>
-                    </div>
-
-                    <div className="layer-switch-item layer-switch-item--fog">
-                      <Group align="center" wrap="nowrap" gap={6}>
-                        <Switch
-                          size="xs"
-                          color="gray"
-                          checked={showFogLayer}
-                          onChange={(event) => setShowFogLayer(Boolean(event.currentTarget.checked))}
-                        />
-                        <Text size="xs" fw={600} className="layer-switch-label">Туман</Text>
-                      </Group>
-                    </div>
-
-                    <div className="layer-switch-item layer-switch-item--thunder">
-                      <Group align="center" wrap="nowrap" gap={6}>
-                        <Switch
-                          size="xs"
-                          color="violet"
-                          checked={showThunderLayer}
-                          onChange={(event) => setShowThunderLayer(Boolean(event.currentTarget.checked))}
-                        />
-                        <Text size="xs" fw={600} className="layer-switch-label">Гроза</Text>
-                      </Group>
-                    </div>
-
-                    <div className="layer-switch-item layer-switch-item--wind">
-                      <Group align="center" wrap="nowrap" gap={6}>
-                        <Switch
-                          size="xs"
-                          color="orange"
-                          checked={showWindLayer}
-                          onChange={(event) => setShowWindLayer(Boolean(event.currentTarget.checked))}
-                        />
-                        <Text size="xs" fw={600} className="layer-switch-label">Ветер</Text>
-                      </Group>
-                    </div>
                   </div>
                   {activeRoute?.from && activeRoute?.to && (
                     <div className="route-direction-chip">
@@ -3268,37 +3292,37 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
                           <Group justify="space-between">
                             <Text size="sm">Взлет</Text>
                             <Text size="sm" fw={600}>
-                              {effectiveRisk.departure.score}/100 ({riskLevelLabel(effectiveRisk.departure.score)})
+                              {formatRiskBadgeScore(effectiveRisk.departure.score)} ({riskLevelLabel(effectiveRisk.departure.score)})
                             </Text>
                           </Group>
-                          <Progress value={effectiveRisk.departure.score} color={getRiskColor(effectiveRisk.departure.score)} />
+                          <Progress value={getDisplayProgressValue(effectiveRisk.departure.score)} color={getRiskColor(effectiveRisk.departure.score)} />
 
                           <Group justify="space-between">
                             <Text size="sm">Посадка</Text>
                             <Text size="sm" fw={600}>
-                              {effectiveRisk.arrival.score}/100 ({riskLevelLabel(effectiveRisk.arrival.score)})
+                              {formatRiskBadgeScore(effectiveRisk.arrival.score)} ({riskLevelLabel(effectiveRisk.arrival.score)})
                             </Text>
                           </Group>
-                          <Progress value={effectiveRisk.arrival.score} color={getRiskColor(effectiveRisk.arrival.score)} />
+                          <Progress value={getDisplayProgressValue(effectiveRisk.arrival.score)} color={getRiskColor(effectiveRisk.arrival.score)} />
 
                           <Group justify="space-between">
                             <Text size="sm">{isHelicopterMode ? 'Маршрут' : 'Эшелон ~12 км'}</Text>
                             <Text size="sm" fw={600}>
-                              {effectiveRisk.cruise.score}/100 ({riskLevelLabel(effectiveRisk.cruise.score)})
+                              {formatRiskBadgeScore(effectiveRisk.cruise.score)} ({riskLevelLabel(effectiveRisk.cruise.score)})
                             </Text>
                           </Group>
-                          <Progress value={effectiveRisk.cruise.score} color={getRiskColor(effectiveRisk.cruise.score)} />
+                          <Progress value={getDisplayProgressValue(effectiveRisk.cruise.score)} color={getRiskColor(effectiveRisk.cruise.score)} />
 
                           {effectiveRisk.temporal && (
                             <>
                               <Group justify="space-between">
                                 <Text size="sm">Временной фактор</Text>
                                 <Text size="sm" fw={600}>
-                                  {effectiveRisk.temporal.score}/100 ({riskLevelLabel(effectiveRisk.temporal.score)})
+                                  {formatRiskBadgeScore(effectiveRisk.temporal.score)} ({riskLevelLabel(effectiveRisk.temporal.score)})
                                 </Text>
                               </Group>
                               <Progress
-                                value={effectiveRisk.temporal.score}
+                                value={getDisplayProgressValue(effectiveRisk.temporal.score)}
                                 color={getRiskColor(effectiveRisk.temporal.score)}
                               />
                             </>
@@ -3308,10 +3332,75 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
                           <Group justify="space-between">
                             <Text fw={700}>Итоговый риск</Text>
                             <Text fw={700}>
-                              {effectiveRisk.total}/100 ({riskLevelLabel(effectiveRisk.total)})
+                              {formatRiskBadgeScore(effectiveRisk.total)} ({riskLevelLabel(effectiveRisk.total)})
                             </Text>
                           </Group>
                           <Progress value={effectiveRisk.total} color={getRiskColor(effectiveRisk.total)} size="lg" radius="xl" />
+
+                          {riskForecast && (
+                            <Alert
+                              color={riskForecast.value > effectiveRisk.total ? 'yellow' : 'teal'}
+                              radius="md"
+                              variant="light"
+                              icon={<IconAlertTriangle size={16} />}
+                              title="Прогноз изменения риска"
+                            >
+                              <Stack gap={3}>
+                                <Text size="sm">{riskForecast.text}</Text>
+                                <Text size="xs" c="dimmed">
+                                  Прогноз учитывает текущий ветер, видимость, осадки и временной фактор вылета.
+                                </Text>
+                              </Stack>
+                            </Alert>
+                          )}
+
+                          <Divider />
+                          <Stack gap={6}>
+                            <Text fw={700}>Причины риска</Text>
+                            {(activeFlight
+                              ? collectRiskReasons(activeFlight, timeTick)
+                              : [
+                                  ...(effectiveRisk.departure?.factors ?? []),
+                                  ...(effectiveRisk.arrival?.factors ?? []),
+                                  ...(effectiveRisk.cruise?.factors ?? []),
+                                  ...(effectiveRisk.temporal?.factors ?? []),
+                                ]
+                            ).slice(0, 8).map((reason) => (
+                              <Group key={reason} gap={6} wrap="nowrap">
+                                <span className="risk-reason-dot" />
+                                <Text size="sm">{reason}</Text>
+                              </Group>
+                            ))}
+                          </Stack>
+
+                          {activeFlight && (
+                            <>
+                              <Divider />
+                              <Stack gap={6}>
+                                <Group justify="space-between" align="center">
+                                  <Text fw={700}>История пересчетов риска</Text>
+                                  {isActiveFlightHistoryLoading && <Badge variant="light">загрузка</Badge>}
+                                </Group>
+                                {activeFlightHistoryError ? (
+                                  <Text size="sm" c="red">{activeFlightHistoryError}</Text>
+                                ) : activeFlightHistory.length === 0 ? (
+                                  <Text size="sm" c="dimmed">История пока пуста.</Text>
+                                ) : (
+                                  activeFlightHistory.slice(0, 5).map((item) => (
+                                    <Paper key={item.id} withBorder radius="md" p="xs" className="history-item">
+                                      <Group justify="space-between" gap="xs" align="flex-start">
+                                        <Text size="xs" c="dimmed">{formatDateTime(item.changedAt)}</Text>
+                                        <Text size="sm" fw={700} className="history-risk-text">
+                                          {item.oldTotalRisk == null ? 'нет' : formatRiskBadgeScore(item.oldTotalRisk)} → {item.newTotalRisk == null ? 'нет' : formatRiskBadgeScore(item.newTotalRisk)}
+                                        </Text>
+                                      </Group>
+                                      <Text size="sm">{getRiskChangeReason(item)}</Text>
+                                    </Paper>
+                                  ))
+                                )}
+                              </Stack>
+                            </>
+                          )}
                         </>
                       ) : isPreviewEvaluating ? (
                         <Text c="dimmed">Предварительный расчет риска...</Text>
@@ -3341,6 +3430,74 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
                 label={`Показывать ушедшие рейсы (${departedFlightsCount})`}
               />
             </Group>
+            <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="sm">
+              <Paper withBorder radius="md" p="sm" className="critical-tile critical-tile--risk">
+                <Text size="xs" c="dimmed">Критические рейсы</Text>
+                <Text fw={800} size="xl">{flightSummary.critical}</Text>
+              </Paper>
+              <Paper withBorder radius="md" p="sm" className="critical-tile critical-tile--data">
+                <Text size="xs" c="dimmed">Ожидают данных</Text>
+                <Text fw={800} size="xl">{flightSummary.awaitingData}</Text>
+              </Paper>
+              <Paper withBorder radius="md" p="sm" className="critical-tile critical-tile--delay">
+                <Text size="xs" c="dimmed">Задержаны</Text>
+                <Text fw={800} size="xl">{flightSummary.delayed}</Text>
+              </Paper>
+            </SimpleGrid>
+            <SimpleGrid cols={{ base: 1, sm: 2, lg: 5 }} spacing="sm">
+              <TextInput
+                label="Поиск по рейсу"
+                placeholder="Например: SU123"
+                value={flightFilters.search}
+                onChange={(event) =>
+                  setFlightFilters((prev) => ({ ...prev, search: event.target.value }))
+                }
+              />
+              <NativeSelect
+                label="Уровень риска"
+                value={flightFilters.risk}
+                onChange={(event) =>
+                  setFlightFilters((prev) => ({ ...prev, risk: event.target.value }))
+                }
+              >
+                {FLIGHT_RISK_FILTERS.map((item) => (
+                  <option key={item.value} value={item.value}>{item.label}</option>
+                ))}
+              </NativeSelect>
+              <NativeSelect
+                label="Статус"
+                value={flightFilters.status}
+                onChange={(event) =>
+                  setFlightFilters((prev) => ({ ...prev, status: event.target.value }))
+                }
+              >
+                {FLIGHT_STATUS_FILTERS.map((item) => (
+                  <option key={item.value} value={item.value}>{item.label}</option>
+                ))}
+              </NativeSelect>
+              <NativeSelect
+                label="Аэропорт"
+                value={flightFilters.airport}
+                onChange={(event) =>
+                  setFlightFilters((prev) => ({ ...prev, airport: event.target.value }))
+                }
+              >
+                {flightAirportFilterOptions.map((item) => (
+                  <option key={item.value} value={item.value}>{item.label}</option>
+                ))}
+              </NativeSelect>
+              <NativeSelect
+                label="Время вылета"
+                value={flightFilters.departureTime}
+                onChange={(event) =>
+                  setFlightFilters((prev) => ({ ...prev, departureTime: event.target.value }))
+                }
+              >
+                {DEPARTURE_TIME_FILTERS.map((item) => (
+                  <option key={item.value} value={item.value}>{item.label}</option>
+                ))}
+              </NativeSelect>
+            </SimpleGrid>
             {isLoadingFlights ? (
               <Text c="dimmed">Загружаем рейсы...</Text>
             ) : filteredFlights.length === 0 ? (
@@ -3350,28 +3507,29 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
               </Text>
             ) : visibleFlights.length === 0 ? (
               <Text c="dimmed">
-                Активных рейсов нет. Включите «Показывать ушедшие рейсы», чтобы увидеть архив.
+                Рейсов по текущим фильтрам нет.
               </Text>
             ) : (
-              <Box className="flights-table-wrap">
-                <Table highlightOnHover stickyHeader withTableBorder>
+              <>
+                <Box className="flights-table-wrap">
+                  <Table highlightOnHover stickyHeader withTableBorder>
                   <Table.Thead>
                     <Table.Tr>
                       <Table.Th>Рейс</Table.Th>
                       <Table.Th>Тип</Table.Th>
                       <Table.Th>Маршрут</Table.Th>
-                      <Table.Th>Вылет</Table.Th>
-                      <Table.Th>Прилет</Table.Th>
-                      <Table.Th>Риск</Table.Th>
-                      <Table.Th>Решение</Table.Th>
-                      <Table.Th>Действия</Table.Th>
+                      <Table.Th className="col-departure">Вылет</Table.Th>
+                      <Table.Th className="col-arrival">Прилет</Table.Th>
+                      <Table.Th className="col-risk">Риск</Table.Th>
+                      <Table.Th className="col-decision">Решение</Table.Th>
+                      <Table.Th className="col-actions">Действия</Table.Th>
                     </Table.Tr>
                   </Table.Thead>
                   <Table.Tbody>
                     {visibleFlights.map((flight) => {
                       const estimatedArrivalAt = getFlightArrivalForTable(flight)
                       const departed = isFlightDeparted(flight, timeTick)
-                      const riskScore = asNumberOrNull(flight.totalRisk)
+                      const riskScore = withDisplayRiskFloor(flight.totalRisk)
                       const riskUpdatedAt =
                         flight?.riskUpdatedAt ?? flight?.cachedRiskUpdatedAt ?? flight?.createdAt ?? null
                       const actionState = flightActionById[flight.id] ?? {}
@@ -3380,18 +3538,21 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
                       const isDeciding = Boolean(actionState.decision)
                       const isActionPending = isRefreshing || isCancelling || isDeciding
                       const isBackendActionsBlocked = isRecoveryMode || isActionPending
+                      const urgentMissingData = hasUrgentMissingRiskData(flight, timeTick)
+                      const urgentStaleData = needsUrgentWeatherUpdate(flight, timeTick)
+                      const nextRiskUpdateAt = departed ? null : getNextRiskUpdateAt(flight, timeTick)
 
                       return (
                         <Table.Tr
                           key={flight.id}
-                          className={`flight-row${departed ? ' flight-row--departed' : ''}`}
+                          className={`flight-row${departed ? ' flight-row--departed' : ''}${urgentMissingData ? ' flight-row--urgent-missing' : ''}${urgentStaleData ? ' flight-row--urgent-stale' : ''}${highlightedFlightId === flight.id ? ' flight-row--highlighted' : ''}`}
                           onClick={() => {
                             if (departed) return
                             openFlightFromList(flight)
                           }}
                         >
                           <Table.Td>{flight.flightNumber}</Table.Td>
-                          <Table.Td>
+                          <Table.Td className="flight-type-cell">
                             <Badge
                               variant="light"
                               color={flight.aircraftType === TRANSPORT_MODE_HELICOPTER ? 'grape' : 'blue'}
@@ -3399,10 +3560,10 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
                               {flight.aircraftType === TRANSPORT_MODE_HELICOPTER ? 'Вертолет' : 'Самолет'}
                             </Badge>
                           </Table.Td>
-                          <Table.Td>
+                          <Table.Td className="flight-route-cell">
                             {flight.fromAirportId} - {flight.toAirportId}
                           </Table.Td>
-                          <Table.Td>
+                          <Table.Td className="flight-departure-cell col-departure">
                             <Stack gap={2}>
                               <Text size="sm">{formatDateTime(flight.departureAt)}</Text>
                               <Text size="xs" c="dimmed">
@@ -3410,23 +3571,40 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
                               </Text>
                             </Stack>
                           </Table.Td>
-                          <Table.Td>{formatDateTime(estimatedArrivalAt)}</Table.Td>
-                          <Table.Td>
+                          <Table.Td className="col-arrival">{formatDateTime(estimatedArrivalAt)}</Table.Td>
+                          <Table.Td className="col-risk">
                             <Stack gap={2}>
                               <Group gap={8} align="center">
-                                <Badge variant="dot" color={getRiskColor(riskScore ?? 0)}>
+                                <Badge
+                                  variant="dot"
+                                  color={getRiskColor(riskScore ?? 0)}
+                                >
                                   {riskScore == null ? 'нет данных' : `${riskScore}/100`}
                                 </Badge>
                               </Group>
-                              <Text size="xs" c="dimmed">
+                              <Text size="xs" c="dimmed" className="risk-meta-line">
                                 {formatRiskUpdatedAgo(riskUpdatedAt, timeTick)}
+                              </Text>
+                              <Text size="xs" c="dimmed" className="risk-meta-line">
+                                Следующее обновление: {nextRiskUpdateAt
+                                  ? nextRiskUpdateAt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
+                                  : 'не требуется'}
                               </Text>
                             </Stack>
                           </Table.Td>
-                          <Table.Td>
+                          <Table.Td className="col-decision">
                             <Stack gap={2}>
-                              <Badge variant="light" color={decisionColor(flight.dispatcherDecision)}>
-                                {decisionLabel(flight.dispatcherDecision)}
+                              <Badge
+                                variant="light"
+                                color={decisionColor(flight.dispatcherDecision)}
+                                className={!departed ? 'decision-badge-clickable' : ''}
+                                onClick={(event) => {
+                                  if (departed) return
+                                  event.stopPropagation()
+                                  openDecisionModal(flight)
+                                }}
+                              >
+                                {departed ? 'Завершен' : decisionLabel(flight.dispatcherDecision)}
                               </Badge>
                               {flight.dispatcherDecisionDelayMinutes ? (
                                 <Text size="xs" c="dimmed">
@@ -3434,99 +3612,105 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
                                 </Text>
                               ) : null}
                               {flight.dispatcherDecisionReason ? (
-                                <Text size="xs" c="dimmed" lineClamp={2}>
+                                <Text size="xs" c="dimmed">
                                   {flight.dispatcherDecisionReason}
                                 </Text>
                               ) : null}
                             </Stack>
                           </Table.Td>
-                          <Table.Td>
-                            <Group gap="xs" wrap="wrap" className="flight-actions">
-                              <Button
-                                variant="default"
-                                radius="xl"
-                                size="xs"
-                                onClick={(event) => {
-                                  event.stopPropagation()
-                                  printFlightReport(flight)
-                                }}
-                                disabled={isActionPending}
-                              >
-                                Отчет
-                              </Button>
-                              {!departed && (
-                                <>
+                          <Table.Td className="flight-actions-cell col-actions">
+                            <div className={`flight-actions-wrap${!departed ? ' flight-actions-wrap--with-icons' : ''}`}>
+                              <div className="flight-actions-grid">
+                                <Group gap="xs" wrap="nowrap" className="flight-actions flight-actions-row">
                                   <Button
-                                    variant="light"
-                                    color="blue"
+                                    variant="default"
                                     radius="xl"
                                     size="xs"
-                                  onClick={(event) => {
-                                    event.stopPropagation()
-                                    openDecisionModal(flight)
-                                  }}
-                                    disabled={isBackendActionsBlocked}
-                                  >
-                                    Решение
-                                  </Button>
-                                  <Button
-                                    variant="light"
-                                    color="yellow"
-                                    radius="xl"
-                                    size="xs"
-                                    leftSection={<IconMessageCircle size={14} />}
                                     onClick={(event) => {
                                       event.stopPropagation()
-                                      onRequestMeteorologist?.({
-                                        flightNumber: flight.flightNumber ?? '',
-                                        fromAirportId: flight.fromAirportId ?? '',
-                                        toAirportId: flight.toAirportId ?? '',
-                                        etd: toDateTimeLocalValue(flight.departureAt),
-                                        eta: toDateTimeLocalValue(estimatedArrivalAt),
-                                      })
+                                      openHistoryModal(flight)
+                                    }}
+                                  >
+                                    История рейса
+                                  </Button>
+                                  {!departed && (
+                                    <Button
+                                      variant="light"
+                                      color="yellow"
+                                      radius="xl"
+                                      size="xs"
+                                      leftSection={<IconMessageCircle size={14} />}
+                                      onClick={(event) => {
+                                        event.stopPropagation()
+                                        onRequestMeteorologist?.({
+                                          flightNumber: flight.flightNumber ?? '',
+                                          fromAirportId: flight.fromAirportId ?? '',
+                                          toAirportId: flight.toAirportId ?? '',
+                                          etd: toDateTimeLocalValue(flight.departureAt),
+                                          eta: toDateTimeLocalValue(estimatedArrivalAt),
+                                        })
+                                      }}
+                                      disabled={isActionPending}
+                                    >
+                                      Метеоролог
+                                    </Button>
+                                  )}
+                                  <ActionIcon
+                                    variant="default"
+                                    radius="xl"
+                                    size="lg"
+                                    title="Отчет"
+                                    onClick={(event) => {
+                                      event.stopPropagation()
+                                      printFlightReport(flight)
                                     }}
                                     disabled={isActionPending}
                                   >
-                                    Метеоролог
-                                  </Button>
-                                  <ActionIcon
-                                    variant="subtle"
-                                    color="blue"
-                                    size="lg"
-                                    radius="xl"
-                                    title="Обновить риск"
-                                    onClick={(event) => {
-                                      event.stopPropagation()
-                                      handleRefreshRisk(flight.id)
-                                    }}
-                                    disabled={isBackendActionsBlocked}
-                                  >
-                                    <IconRefresh size={16} />
+                                    <IconFileText size={16} />
                                   </ActionIcon>
-                                  <ActionIcon
-                                    variant="subtle"
-                                    color="red"
-                                    size="lg"
-                                    radius="xl"
-                                    title="Отменить рейс"
-                                    onClick={(event) => {
-                                      event.stopPropagation()
-                                      requestCancelFlight(flight)
-                                    }}
-                                    disabled={isBackendActionsBlocked}
-                                  >
-                                    <IconTrash size={16} />
-                                  </ActionIcon>
-                                </>
-                              )}
-                            </Group>
+                                  {!departed && (
+                                    <>
+                                      <ActionIcon
+                                        variant="subtle"
+                                        color="blue"
+                                        size="lg"
+                                        radius="xl"
+                                        title="Обновить риск"
+                                        onClick={(event) => {
+                                          event.stopPropagation()
+                                          handleRefreshRisk(flight.id)
+                                        }}
+                                        disabled={isBackendActionsBlocked}
+                                      >
+                                        <IconRefresh size={16} />
+                                      </ActionIcon>
+                                      <ActionIcon
+                                        variant="subtle"
+                                        color="red"
+                                        size="lg"
+                                        radius="xl"
+                                        title="Удалить рейс"
+                                        onClick={(event) => {
+                                          event.stopPropagation()
+                                          requestCancelFlight(flight)
+                                        }}
+                                        disabled={isBackendActionsBlocked}
+                                      >
+                                        <IconTrash size={16} />
+                                      </ActionIcon>
+                                    </>
+                                  )}
+                                </Group>
+                              </div>
+                            </div>
                           </Table.Td>
                         </Table.Tr>
                       )
                     })}
                   </Table.Tbody>
                 </Table>
-              </Box>
+                </Box>
+              </>
             )}
 
             {flightsError && (
@@ -3539,6 +3723,116 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
                 {flightActionError}
               </Alert>
             )}
+          </Stack>
+        </Paper>
+      )}
+
+      {activeTab === 'analytics' && (
+        <Paper withBorder radius="xl" p="lg" className="surface-card">
+          <Stack gap="md">
+            <Group justify="space-between" align="center" wrap="wrap">
+              <Title order={4}>Аналитика</Title>
+              <Badge variant="light" color={isHelicopterMode ? 'grape' : 'blue'}>
+                {transportMode === TRANSPORT_MODE_HELICOPTER ? 'Вертолеты' : 'Самолеты'}
+              </Badge>
+            </Group>
+
+            <SimpleGrid cols={{ base: 1, sm: 3 }} spacing="sm">
+              <Paper withBorder radius="md" p="md" className="metric-tile">
+                <Text size="xs" c="dimmed">Всего рейсов</Text>
+                <Text fw={800} size="xl">{analytics.total}</Text>
+              </Paper>
+              <Paper withBorder radius="md" p="md" className="metric-tile">
+                <Text size="xs" c="dimmed">Задержано рейсов</Text>
+                <Text fw={800} size="xl">{analytics.delayed}</Text>
+              </Paper>
+              <Paper withBorder radius="md" p="md" className="metric-tile">
+                <Text size="xs" c="dimmed">Запросов метеорологу</Text>
+                <Text fw={800} size="xl">{analytics.meteorologistRequests}</Text>
+              </Paper>
+            </SimpleGrid>
+
+            <SimpleGrid cols={{ base: 1, lg: 2 }} spacing="md">
+              <Card withBorder radius="lg" padding="md" className="surface-card surface-card--subtle">
+                <Stack gap="sm">
+                  <Title order={5}>Количество рейсов по рискам</Title>
+                  {analytics.riskBuckets.map((bucket) => {
+                    const percent = analytics.total > 0 ? (bucket.count / analytics.total) * 100 : 0
+                    return (
+                      <Stack key={bucket.value} gap={4}>
+                        <Group justify="space-between">
+                          <Text size="sm">{bucket.label}</Text>
+                          <Text size="sm" fw={700}>{bucket.count}</Text>
+                        </Group>
+                        <div className="analytics-bar">
+                          <div
+                            className={`analytics-bar-fill analytics-bar-fill--${bucket.value.toLowerCase()}`}
+                            style={{ width: `${percent}%` }}
+                          />
+                        </div>
+                      </Stack>
+                    )
+                  })}
+                </Stack>
+              </Card>
+
+              <Card withBorder radius="lg" padding="md" className="surface-card surface-card--subtle">
+                <Stack gap="sm">
+                  <Title order={5}>Операционные показатели</Title>
+                  <Stack gap={8}>
+                    <Group justify="space-between">
+                      <Text size="sm">Задержано</Text>
+                      <Badge color="yellow" variant="light">{analytics.delayed}</Badge>
+                    </Group>
+                    <Progress
+                      value={analytics.total > 0 ? (analytics.delayed / analytics.total) * 100 : 0}
+                      color="yellow"
+                      radius="xl"
+                    />
+                    <Group justify="space-between">
+                      <Text size="sm">Запросов метеорологу</Text>
+                      <Badge color="blue" variant="light">{analytics.meteorologistRequests}</Badge>
+                    </Group>
+                    <Progress
+                      value={Math.min(100, analytics.meteorologistRequests * 10)}
+                      color="blue"
+                      radius="xl"
+                    />
+                  </Stack>
+                </Stack>
+              </Card>
+            </SimpleGrid>
+
+            <Card withBorder radius="lg" padding="md" className="surface-card surface-card--subtle">
+              <Stack gap="sm">
+                <Group justify="space-between" align="center">
+                  <Title order={5}>Погодная динамика (круговая диаграмма)</Title>
+                  <Badge variant="light">{weatherPieData.total}</Badge>
+                </Group>
+                <Text size="xs" c="dimmed">
+                  Доли по последним погодным снимкам: низкий, средний и высокий риск.
+                </Text>
+                {analytics.total === 0 ? (
+                  <Text size="sm" c="dimmed">
+                    Нет данных для диаграммы.
+                  </Text>
+                ) : (
+                  <Group align="center" gap="xl" wrap="wrap">
+                    <div
+                      className="weather-pie"
+                      style={{
+                        background: `conic-gradient(#12b886 0 ${weatherPieData.calmPct}%, #fab005 ${weatherPieData.calmPct}% ${weatherPieData.calmPct + weatherPieData.warningPct}%, #fa5252 ${weatherPieData.calmPct + weatherPieData.warningPct}% 100%)`,
+                      }}
+                    />
+                    <Stack gap={6}>
+                      <Group gap={8}><span className="pie-legend-dot pie-legend-dot--calm" /><Text size="sm">Низкий: {weatherPieData.calm} ({weatherPieData.calmPct}%)</Text></Group>
+                      <Group gap={8}><span className="pie-legend-dot pie-legend-dot--warning" /><Text size="sm">Средний: {weatherPieData.warning} ({weatherPieData.warningPct}%)</Text></Group>
+                      <Group gap={8}><span className="pie-legend-dot pie-legend-dot--severe" /><Text size="sm">Высокий: {weatherPieData.severe} ({weatherPieData.severePct}%)</Text></Group>
+                    </Stack>
+                  </Group>
+                )}
+              </Stack>
+            </Card>
           </Stack>
         </Paper>
       )}
@@ -3572,12 +3866,6 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
             disabled={isRecoveryMode}
           />
 
-          {isRecoveryMode && (
-            <Alert color="orange" radius="md" variant="light" icon={<IconAlertTriangle size={16} />}>
-              Режим восстановления: backend недоступен, применение решений временно отключено.
-            </Alert>
-          )}
-
           {decisionForm.decision === DISPATCHER_DECISION_DELAY && (
             <Stack gap="xs">
               <Group gap="xs" wrap="wrap">
@@ -3602,7 +3890,6 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
                   Рассчитать what-if
                 </Button>
               </Group>
-
               <Group gap="xs" wrap="wrap">
                 {WHAT_IF_DELAY_OPTIONS.map((minutes) => (
                   <Button
@@ -3633,10 +3920,6 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
                   ({decisionWhatIf.riskDelta > 0 ? '+' : ''}{decisionWhatIf.riskDelta})
                 </Text>
                 <Text size="sm">{decisionWhatIf.recommendation}</Text>
-                <Text size="xs" c="dimmed">
-                  Новый вылет: {formatDateTime(decisionWhatIf.simulatedDepartureAt)} | Новый прилет:{' '}
-                  {formatDateTime(decisionWhatIf.simulatedArrivalAt)}
-                </Text>
               </Stack>
             </Alert>
           )}
@@ -3696,6 +3979,55 @@ export default function DispatcherPage({ onRequestMeteorologist, initialTab = 'm
               Да, удалить
             </Button>
           </Group>
+        </Stack>
+      </Modal>
+
+      <Modal
+        opened={Boolean(historyFlight)}
+        onClose={() => setHistoryFlight(null)}
+        centered
+        radius="xl"
+        title="История рейса"
+        size="lg"
+      >
+        <Stack gap="md">
+          <Text size="sm" c="dimmed">
+            {historyFlight?.flightNumber} | {historyFlight?.fromAirportId} - {historyFlight?.toAirportId}
+          </Text>
+          {isHistoryModalLoading ? (
+            <Text c="dimmed">Загружаем историю...</Text>
+          ) : historyModalError ? (
+            <Alert color="red">{historyModalError}</Alert>
+          ) : historyModalItems.length === 0 ? (
+            <Text c="dimmed">История пока пуста.</Text>
+          ) : (
+            <Box className="flights-table-wrap">
+              <Table withTableBorder>
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>Время</Table.Th>
+                    <Table.Th>Событие</Table.Th>
+                    <Table.Th>Риск</Table.Th>
+                    <Table.Th>Комментарий</Table.Th>
+                  </Table.Tr>
+                </Table.Thead>
+                <Table.Tbody>
+                  {historyModalItems.map((item) => (
+                    <Table.Tr key={item.id}>
+                      <Table.Td>{formatDateTime(item.changedAt)}</Table.Td>
+                      <Table.Td>{getRiskChangeReason(item)}</Table.Td>
+                      <Table.Td>
+                        <Text size="sm" fw={700} className="history-risk-text">
+                          {item.oldTotalRisk == null ? 'нет' : formatRiskBadgeScore(item.oldTotalRisk)} → {item.newTotalRisk == null ? 'нет' : formatRiskBadgeScore(item.newTotalRisk)}
+                        </Text>
+                      </Table.Td>
+                      <Table.Td>{item.dispatcherDecisionReason || '—'}</Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+            </Box>
+          )}
         </Stack>
       </Modal>
     </Stack>

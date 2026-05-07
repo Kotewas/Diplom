@@ -21,8 +21,6 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class WeatherService {
-    private static final String OPEN_METEO_BASE_URL = "https://api.open-meteo.com/v1/forecast";
-
     private final AirportCatalogService airportCatalogService;
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
@@ -72,15 +70,10 @@ public class WeatherService {
     }
 
     private JsonNode fetchWeather(AirportDto airport) {
-        if (weatherApiKey != null && !weatherApiKey.isBlank()) {
-            try {
-                return fetchFromOpenWeather(airport);
-            } catch (Exception ignored) {
-                // Fallback below.
-            }
+        if (weatherApiKey == null || weatherApiKey.isBlank()) {
+            throw new IllegalStateException("OpenWeatherMap API key is not configured");
         }
-
-        return fetchFromOpenMeteoAsOpenWeather(airport);
+        return fetchFromOpenWeather(airport);
     }
 
     private JsonNode fetchFromOpenWeather(AirportDto airport) {
@@ -106,72 +99,6 @@ public class WeatherService {
         }
     }
 
-    private JsonNode fetchFromOpenMeteoAsOpenWeather(AirportDto airport) {
-        URI uri = UriComponentsBuilder
-                .fromHttpUrl(OPEN_METEO_BASE_URL)
-                .queryParam("latitude", airport.lat())
-                .queryParam("longitude", airport.lon())
-                .queryParam("current", "temperature_2m,pressure_msl,wind_speed_10m,wind_gusts_10m,cloud_cover,rain,snowfall,weather_code")
-                .queryParam("wind_speed_unit", "ms")
-                .queryParam("timezone", "UTC")
-                .build(true)
-                .toUri();
-
-        ResponseEntity<String> response = restTemplate.getForEntity(uri, String.class);
-        if (!response.getStatusCode().is2xxSuccessful() || response.getBody() == null) {
-            throw new IllegalStateException("Fallback weather API error: HTTP " + response.getStatusCode().value());
-        }
-
-        JsonNode payload;
-        try {
-            payload = objectMapper.readTree(response.getBody());
-        } catch (Exception exception) {
-            throw new IllegalStateException("Cannot parse fallback weather API response", exception);
-        }
-
-        JsonNode current = payload.path("current");
-        if (current.isMissingNode() || current.isNull()) {
-            throw new IllegalStateException("Fallback weather API returned empty current weather");
-        }
-
-        double temp = safeNumber(current.path("temperature_2m"), 15);
-        double pressure = safeNumber(current.path("pressure_msl"), 1013);
-        double wind = safeNumber(current.path("wind_speed_10m"), 0);
-        double gust = safeNumber(current.path("wind_gusts_10m"), wind);
-        double cloudiness = safeNumber(current.path("cloud_cover"), 0);
-        double rain = safeNumber(current.path("rain"), 0);
-        double snowfall = safeNumber(current.path("snowfall"), 0);
-        int weatherCode = (int) safeNumber(current.path("weather_code"), 0);
-
-        ObjectNode normalized = objectMapper.createObjectNode();
-        ObjectNode windNode = normalized.putObject("wind");
-        windNode.put("speed", wind);
-        windNode.put("gust", gust);
-
-        ObjectNode mainNode = normalized.putObject("main");
-        mainNode.put("temp", temp);
-        mainNode.put("pressure", pressure);
-
-        ObjectNode cloudsNode = normalized.putObject("clouds");
-        cloudsNode.put("all", cloudiness);
-
-        if (rain > 0) {
-            normalized.putObject("rain").put("1h", rain);
-        }
-        if (snowfall > 0) {
-            normalized.putObject("snow").put("1h", snowfall);
-        }
-
-        ArrayNode weatherArray = normalized.putArray("weather");
-        ObjectNode weatherNode = weatherArray.addObject();
-        weatherNode.put("id", toOpenWeatherCode(weatherCode));
-        weatherNode.put("description", describeOpenMeteoWeather(weatherCode));
-        normalized.put("visibility", 10000);
-        normalized.put("provider", "open-meteo");
-
-        return normalized;
-    }
-
     private double safeNumber(JsonNode value, double fallback) {
         if (value == null || value.isNull() || value.isMissingNode()) {
             return fallback;
@@ -179,49 +106,23 @@ public class WeatherService {
         return value.isNumber() ? value.asDouble() : fallback;
     }
 
-    private int toOpenWeatherCode(int openMeteoCode) {
-        if (openMeteoCode == 45 || openMeteoCode == 48) {
-            return 741;
+    private String describeOpenWeatherCode(int openWeatherCode) {
+        if (openWeatherCode >= 200 && openWeatherCode < 300) {
+            return "Гроза";
         }
-        if (openMeteoCode == 95 || openMeteoCode == 96 || openMeteoCode == 99) {
-            return 211;
+        if (openWeatherCode >= 500 && openWeatherCode < 600) {
+            return "Дождь";
         }
-        if (openMeteoCode >= 51 && openMeteoCode <= 67) {
-            return 501;
+        if (openWeatherCode >= 600 && openWeatherCode < 700) {
+            return "Снег";
         }
-        if (openMeteoCode >= 71 && openMeteoCode <= 77) {
-            return 601;
+        if (openWeatherCode == 741 || openWeatherCode == 701) {
+            return "Туман";
         }
-        if (openMeteoCode == 80 || openMeteoCode == 81 || openMeteoCode == 82) {
-            return 501;
+        if (openWeatherCode >= 801) {
+            return "Облачно";
         }
-        if (openMeteoCode == 85 || openMeteoCode == 86) {
-            return 601;
-        }
-        if (openMeteoCode == 1) {
-            return 801;
-        }
-        if (openMeteoCode == 2) {
-            return 802;
-        }
-        if (openMeteoCode == 3) {
-            return 804;
-        }
-        return 800;
-    }
-
-    private String describeOpenMeteoWeather(int openMeteoCode) {
-        return switch (openMeteoCode) {
-            case 0 -> "Ясно";
-            case 1, 2 -> "Переменная облачность";
-            case 3 -> "Пасмурно";
-            case 45, 48 -> "Туман";
-            case 51, 53, 55, 56, 57, 80, 81, 82 -> "Дождь";
-            case 61, 63, 65, 66, 67 -> "Сильные осадки";
-            case 71, 73, 75, 77, 85, 86 -> "Снег";
-            case 95, 96, 99 -> "Гроза";
-            default -> "Погодные условия";
-        };
+        return "Ясно";
     }
 
     private JsonNode buildSyntheticWeather(AirportDto airport, Exception sourceError) {

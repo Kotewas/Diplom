@@ -31,7 +31,11 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiErrorResponse> handleUnexpected(Exception exception) {
+        String message = exception.getMessage();
+        if (message == null || message.isBlank()) {
+            message = "Unexpected server error";
+        }
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(new ApiErrorResponse("Unexpected server error", Instant.now()));
+                .body(new ApiErrorResponse(message, Instant.now()));
     }
 }

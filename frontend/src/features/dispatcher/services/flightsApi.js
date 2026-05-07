@@ -2,10 +2,21 @@ import { API_BASE_URL } from '../model/constants'
 import { fetchWithTimeout } from './httpClient'
 
 async function extractErrorMessage(response, fallback) {
+  const contentType = response.headers.get('content-type') || ''
   try {
-    const payload = await response.json()
-    if (payload?.message) {
-      return payload.message
+    if (contentType.includes('application/json')) {
+      const payload = await response.json()
+      if (payload?.message) {
+        return payload.message
+      }
+      if (payload?.error) {
+        return payload.error
+      }
+    } else {
+      const text = (await response.text()).trim()
+      if (text) {
+        return text.slice(0, 240)
+      }
     }
   } catch {
     // ignore parse errors, fallback below
@@ -47,6 +58,16 @@ export async function refreshFlightRisk(flightId) {
 
   if (!response.ok) {
     const message = await extractErrorMessage(response, `Refresh risk HTTP ${response.status}`)
+    throw new Error(message)
+  }
+
+  return response.json()
+}
+
+export async function fetchFlightHistory(flightId) {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/api/flights/${flightId}/history`)
+  if (!response.ok) {
+    const message = await extractErrorMessage(response, `Flight history HTTP ${response.status}`)
     throw new Error(message)
   }
 

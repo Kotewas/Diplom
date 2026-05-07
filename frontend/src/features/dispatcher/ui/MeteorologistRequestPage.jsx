@@ -4,6 +4,7 @@ import {
   Button,
   Checkbox,
   Group,
+  List,
   Paper,
   SimpleGrid,
   Stack,
@@ -12,11 +13,12 @@ import {
   Textarea,
   Title,
 } from '@mantine/core'
-import { IconCheck, IconChevronLeft } from '@tabler/icons-react'
+import { IconAlertCircle, IconCheck, IconChevronLeft } from '@tabler/icons-react'
 import {
   DEFAULT_METEOROLOGIST_NEEDS,
   METEOROLOGIST_NEEDS,
 } from '../model/meteorologistNeeds'
+import { validateDispatcherRequest } from '../model/meteorologistValidation'
 import { saveActiveMeteorologistRequest } from '../services/meteorologistRequestsStorage'
 import './MeteorologistRequestPage.css'
 
@@ -59,14 +61,27 @@ export default function MeteorologistRequestPage({ initialValues, onBack, onSent
   const [form, setForm] = useState(() => createInitialForm(initialValues))
   const [needs, setNeeds] = useState(DEFAULT_METEOROLOGIST_NEEDS)
   const [sendStatus, setSendStatus] = useState('')
+  const [validationError, setValidationError] = useState(null)
 
   const requestMessage = useMemo(() => buildRequestMessage(form, needs), [form, needs])
+  const validation = useMemo(() => validateDispatcherRequest(form), [form])
 
   const toggleNeed = (key) => {
     setNeeds((prev) => ({ ...prev, [key]: !prev[key] }))
   }
 
   const handleSendRequest = () => {
+    setValidationError(null)
+
+    if (!validation.isValid) {
+      setValidationError({
+        title: 'Неполные данные запроса',
+        message: `Заполните следующие поля: ${validation.missingFields.join(', ')}`,
+        details: 'Решение о полете будет приниматься за диспетчером на основе доступной информации.',
+      })
+      return
+    }
+
     const requestPayload = {
       id: `req-${Date.now()}`,
       createdAt: new Date().toISOString(),
@@ -75,6 +90,7 @@ export default function MeteorologistRequestPage({ initialValues, onBack, onSent
       form,
       needs,
       requestText: requestMessage,
+      dataComplete: validation.isValid,
     }
 
     saveActiveMeteorologistRequest(requestPayload)
@@ -179,6 +195,22 @@ export default function MeteorologistRequestPage({ initialValues, onBack, onSent
             {sendStatus && (
               <Alert color="teal" radius="md" variant="light">
                 {sendStatus}
+              </Alert>
+            )}
+            {validationError && (
+              <Alert
+                color="yellow"
+                radius="md"
+                variant="light"
+                icon={<IconAlertCircle size={18} />}
+                title={validationError.title}
+              >
+                <Stack gap={4}>
+                  <Text size="sm">{validationError.message}</Text>
+                  <Text size="xs" c="dimmed">
+                    {validationError.details}
+                  </Text>
+                </Stack>
               </Alert>
             )}
           </Group>

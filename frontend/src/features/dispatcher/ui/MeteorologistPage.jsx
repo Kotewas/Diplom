@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
   Badge,
@@ -11,10 +11,12 @@ import {
   Stack,
   Text,
   Textarea,
+  SegmentedControl,
   Title,
 } from '@mantine/core'
-import { IconChevronLeft, IconSend2 } from '@tabler/icons-react'
+import { IconAlertCircle, IconChevronLeft, IconSend2 } from '@tabler/icons-react'
 import { METEOROLOGIST_NEEDS } from '../model/meteorologistNeeds'
+import { validateMeteorologistResponse } from '../model/meteorologistValidation'
 import {
   markIncomingNotificationRead,
   readActiveMeteorologistRequest,
@@ -68,11 +70,40 @@ export default function MeteorologistPage({ onBack, backLabel = 'К таблиц
   const [selectedRequest, setSelectedRequest] = useState(null)
   const [responseByNeed, setResponseByNeed] = useState({})
   const [submitStatus, setSubmitStatus] = useState('')
+  const [notificationTab, setNotificationTab] = useState('unread')
 
   const requestedNeeds = useMemo(
     () => METEOROLOGIST_NEEDS.filter((item) => selectedRequest?.needs?.[item.key]),
     [selectedRequest],
   )
+
+  const neededKeys = useMemo(
+    () => requestedNeeds.map((item) => item.key),
+    [requestedNeeds],
+  )
+
+  const responseValidation = useMemo(
+    () => validateMeteorologistResponse(responseByNeed, neededKeys),
+    [responseByNeed, neededKeys],
+  )
+  const unreadIncoming = useMemo(
+    () => chatLog.filter((item) => item.direction === 'incoming' && !item.isRead),
+    [chatLog],
+  )
+  const sentOutgoing = useMemo(
+    () => chatLog.filter((item) => item.direction === 'outgoing'),
+    [chatLog],
+  )
+
+  useEffect(() => {
+    const refresh = () => setChatLog(readMeteorologistChatLog())
+    const intervalId = setInterval(refresh, 3000)
+    window.addEventListener('storage', refresh)
+    return () => {
+      clearInterval(intervalId)
+      window.removeEventListener('storage', refresh)
+    }
+  }, [])
 
   const openNotification = (notification) => {
     const nextLog =
@@ -198,36 +229,66 @@ export default function MeteorologistPage({ onBack, backLabel = 'К таблиц
                       </Title>
                       <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="sm">
                         {requestedNeeds.map((need) => (
-                          <Textarea
-                            key={need.key}
-                            label={need.responseLabel}
-                            minRows={3}
-                            autosize
-                            value={responseByNeed[need.key] ?? ''}
-                            placeholder={need.placeholder}
-                            readOnly={isRequestAnswered}
-                            onChange={(event) => updateNeedValue(need.key, event.target.value)}
-                          />
+                          <div key={need.key}>
+                            <Textarea
+                              label={need.responseLabel}
+                              minRows={3}
+                              autosize
+                              value={responseByNeed[need.key] ?? ''}
+                              placeholder={need.placeholder}
+                              readOnly={isRequestAnswered}
+                              onChange={(event) => updateNeedValue(need.key, event.target.value)}
+                              error={!isRequestAnswered && responseValidation.fieldsMissing[need.key] ? 'Обязательное поле' : ''}
+                              styles={{
+                                input: {
+                                  borderColor: !isRequestAnswered && responseValidation.fieldsMissing[need.key] ? 'var(--mantine-color-red-6)' : undefined,
+                                },
+                              }}
+                            />
+                          </div>
                         ))}
                       </SimpleGrid>
                     </Stack>
                   </Paper>
 
                   {!isRequestAnswered && (
-                    <Group gap="sm" wrap="wrap">
-                      <Button
-                        radius="xl"
-                        leftSection={<IconSend2 size={16} />}
-                        onClick={handleSubmitResponse}
-                      >
-                        Отправить обратно диспетчеру
-                      </Button>
-                      {submitStatus && (
-                        <Alert color="teal" radius="md" variant="light">
-                          {submitStatus}
+                    <Stack gap="sm">
+                      <Group gap="sm" wrap="wrap">
+                        <Button
+                          radius="xl"
+                          leftSection={<IconSend2 size={16} />}
+                          onClick={handleSubmitResponse}
+                          color={responseValidation.isValid ? 'blue' : 'orange'}
+                        >
+                          {responseValidation.isValid
+                            ? 'Отправить метеоданные диспетчеру'
+                            : 'Отправить неполные метеоданные диспетчеру'}
+                        </Button>
+                        {submitStatus && (
+                          <Alert color="teal" radius="md" variant="light">
+                            {submitStatus}
+                          </Alert>
+                        )}
+                      </Group>
+                      {!responseValidation.isValid && (
+                        <Alert
+                          color="orange"
+                          radius="md"
+                          variant="light"
+                          icon={<IconAlertCircle size={18} />}
+                          title="Неполные метеоданные"
+                        >
+                          <Stack gap={4}>
+                            <Text size="sm">
+                              Не заполнены: {responseValidation.missingFields.join(', ')}
+                            </Text>
+                            <Text size="xs" c="dimmed">
+                              При отправке неполных данных риск диспетчером будет рассчитан с повышенным коэффициентом.
+                            </Text>
+                          </Stack>
                         </Alert>
                       )}
-                    </Group>
+                    </Stack>
                   )}
                 </>
               )}
@@ -239,34 +300,68 @@ export default function MeteorologistPage({ onBack, backLabel = 'К таблиц
           <Paper withBorder radius="xl" p="lg" className="surface-card">
             <Stack gap="sm">
               <Title order={3}>Уведомления</Title>
+
               {chatLog.length === 0 ? (
                 <Text c="dimmed">Пока уведомлений нет.</Text>
               ) : (
-                <div className="chat-list">
-                  {chatLog.map((chatItem) => (
-                    <button
-                      key={chatItem.id}
-                      type="button"
-                      className={`chat-item ${chatItem.direction === 'outgoing' ? 'outgoing' : 'incoming'} ${chatItem.direction === 'incoming' && !chatItem.isRead ? 'unread' : ''} ${chatItem.direction === 'incoming' && chatItem.isRead && chatItem.isAnswered ? 'answered' : ''} ${activeNotificationId === chatItem.id ? 'active' : ''}`}
-                      onClick={() => openNotification(chatItem)}
-                    >
-                      <div className="chat-item-top">
-                        <strong>
-                          {chatItem.direction === 'outgoing'
-                            ? 'Метеоролог'
-                            : chatItem.dispatcherName || 'Диспетчер'}
-                        </strong>
-                        <span>{formatDateTime(chatItem.createdAt)}</span>
+                <Stack gap="md">
+                  <SegmentedControl
+                    fullWidth
+                    radius="xl"
+                    value={notificationTab}
+                    onChange={setNotificationTab}
+                    data={[
+                      { value: 'unread', label: `Непрочитанные (${unreadIncoming.length})` },
+                      { value: 'sent', label: `Отправленные (${sentOutgoing.length})` },
+                    ]}
+                  />
+
+                  {notificationTab === 'unread' ? (
+                    unreadIncoming.length === 0 ? (
+                      <Text c="dimmed" size="sm">Нет непрочитанных уведомлений.</Text>
+                    ) : (
+                      <div className="chat-list">
+                        {unreadIncoming.map((chatItem) => (
+                          <button
+                            key={chatItem.id}
+                            type="button"
+                            className={`chat-item incoming unread ${activeNotificationId === chatItem.id ? 'active' : ''}`}
+                            onClick={() => openNotification(chatItem)}
+                          >
+                            <div className="chat-item-top">
+                              <strong>{chatItem.dispatcherName || 'Диспетчер'}</strong>
+                              <span>{formatDateTime(chatItem.createdAt)}</span>
+                            </div>
+                            <p>{chatItem.text}</p>
+                            {chatItem.flightNumber && <small>Рейс: {chatItem.flightNumber}</small>}
+                          </button>
+                        ))}
                       </div>
-                      <p>
-                        {chatItem.direction === 'outgoing'
-                          ? 'Данные успешно отправлены'
-                          : chatItem.text}
-                      </p>
-                      {chatItem.flightNumber && <small>Рейс: {chatItem.flightNumber}</small>}
-                    </button>
-                  ))}
-                </div>
+                    )
+                  ) : (
+                    sentOutgoing.length === 0 ? (
+                      <Text c="dimmed" size="sm">Пока нет отправленных ответов.</Text>
+                    ) : (
+                      <div className="chat-list">
+                        {sentOutgoing.map((chatItem) => (
+                          <button
+                            key={chatItem.id}
+                            type="button"
+                            className={`chat-item outgoing ${activeNotificationId === chatItem.id ? 'active' : ''}`}
+                            onClick={() => openNotification(chatItem)}
+                          >
+                            <div className="chat-item-top">
+                              <strong>Метеоролог</strong>
+                              <span>{formatDateTime(chatItem.createdAt)}</span>
+                            </div>
+                            <p>{chatItem.text || 'Данные успешно отправлены'}</p>
+                            {chatItem.flightNumber && <small>Рейс: {chatItem.flightNumber}</small>}
+                          </button>
+                        ))}
+                      </div>
+                    )
+                  )}
+                </Stack>
               )}
             </Stack>
           </Paper>

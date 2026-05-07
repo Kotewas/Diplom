@@ -44,6 +44,11 @@ public class FlightController {
         return flightService.applyDispatcherDecision(flightId, request);
     }
 
+    @GetMapping("/{flightId}/history")
+    public List<FlightHistoryDto> getHistory(@PathVariable String flightId) {
+        return flightService.getFlightHistory(flightId);
+    }
+
     @GetMapping("/{flightId}/what-if-delay")
     public WhatIfDelayResponse simulateDelay(
             @PathVariable String flightId,

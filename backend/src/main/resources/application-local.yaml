@@ -19,6 +19,6 @@ spring:
 
 app:
   # local profile keeps weather endpoints functional via WeatherService fallback
-  # (OpenWeather -> Open-Meteo -> synthetic model)
+  # (OpenWeatherMap API -> synthetic model)
   weather:
     ttl-ms: ${WEATHER_TTL_MS:600000}

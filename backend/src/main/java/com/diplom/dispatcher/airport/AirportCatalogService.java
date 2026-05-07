@@ -74,11 +74,12 @@ public class AirportCatalogService {
             Map.entry("Чернии Яр", "Черный Яр"),
             Map.entry("Черскии", "Черский"),
             Map.entry("Ярославл", "Ярославль"),
-            Map.entry("Александровск-Сахалинскии", "Александровск-Сахалинский")
+            Map.entry("Александровск-Сахалинскии", "Александровск-Сахалинский"),
+            Map.entry("Анадир", "Анадырь")
     );
 
     private static final List<AirportDto> TVER_HELIPORTS = List.of(
-            new AirportDto("TVR_HELI", "Змеево", "Тверь", 56.8591, 35.7577, "tver"),
+            new AirportDto("TVR_HELI", "Змеёво", "Тверь", 56.8591, 35.7577, "tver"),
             new AirportDto("TOR_HELI", "Торжок", "Торжок", 57.0397, 34.9628, "tver"),
             new AirportDto("RZH_HELI", "Ржев", "Ржев", 56.2620, 34.3291, "tver"),
             new AirportDto("KON_HELI", "Конаково", "Конаково", 56.7055, 36.7696, "tver"),
@@ -164,11 +165,15 @@ public class AirportCatalogService {
         String id = normalizeText(source.id());
         String name = normalizeText(source.name());
         String city = normalizeCity(source.city());
+        String region = normalizeText(source.region());
 
         if (id == null || name == null || city == null) {
             return null;
         }
         if ("Аэропорт".equalsIgnoreCase(name)) {
+            return null;
+        }
+        if (region != null && region.equalsIgnoreCase("Казахстан")) {
             return null;
         }
 

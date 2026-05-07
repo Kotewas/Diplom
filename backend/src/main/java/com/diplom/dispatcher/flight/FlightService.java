@@ -6,6 +6,7 @@ import com.diplom.dispatcher.weather.WeatherService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -37,19 +38,25 @@ public class FlightService {
     private static final Pattern HELICOPTER_FLIGHT_NUMBER_PATTERN = Pattern.compile("^H[1-9][0-9]{0,3}$");
     private static final int MIN_DELAY_MINUTES = 5;
     private static final int MAX_DELAY_MINUTES = 360;
+    private static final int AUTO_APPROVE_MAX_RISK = 45;
+    private static final int AUTO_DELAY_MAX_RISK = 75;
+    private static final int AUTO_DELAY_MINUTES = 30;
 
     private final FlightRepository flightRepository;
+    private final FlightHistoryRepository flightHistoryRepository;
     private final AirportCatalogService airportCatalogService;
     private final WeatherService weatherService;
     private final ObjectMapper objectMapper;
 
     public FlightService(
             FlightRepository flightRepository,
+            FlightHistoryRepository flightHistoryRepository,
             AirportCatalogService airportCatalogService,
             WeatherService weatherService,
             ObjectMapper objectMapper
     ) {
         this.flightRepository = flightRepository;
+        this.flightHistoryRepository = flightHistoryRepository;
         this.airportCatalogService = airportCatalogService;
         this.weatherService = weatherService;
         this.objectMapper = objectMapper;
@@ -60,6 +67,15 @@ public class FlightService {
         refreshDueFlightRisks(flights);
         return flights.stream()
                 .map(this::toDto)
+                .toList();
+    }
+
+    public List<FlightHistoryDto> getFlightHistory(String flightId) {
+        if (!flightRepository.existsById(flightId)) {
+            throw new IllegalArgumentException("Рейс не найден: " + flightId);
+        }
+        return flightHistoryRepository.findAllByFlightIdOrderByChangedAtDesc(flightId).stream()
+                .map(this::toHistoryDto)
                 .toList();
     }
 
@@ -92,7 +108,7 @@ public class FlightService {
         entity.setFeasibilityLabel(request.feasibility().label());
         entity.setFeasibilityClassName(request.feasibility().className());
         entity.setRiskUpdatedAt(now);
-        entity.setDispatcherDecision(DispatcherDecision.PENDING);
+        applyAutomaticDecision(entity, now);
 
         FlightEntity saved = flightRepository.save(entity);
         return toDto(saved);
@@ -100,8 +116,11 @@ public class FlightService {
 
     public FlightDto refreshRiskNow(String flightId) {
         FlightEntity flight = findFlightOrThrow(flightId);
+        int oldTotalRisk = flight.getTotalRisk();
+        JsonNode oldWeather = captureFlightWeatherSnapshot(flight);
         recalculateRisk(flight, Instant.now());
         FlightEntity saved = flightRepository.save(flight);
+        saveFlightHistoryEvent(saved, oldTotalRisk, saved.getTotalRisk(), oldWeather, saved.getDispatcherDecision(), saved.getDispatcherDecisionReason(), saved.getDispatcherDecisionDelayMinutes());
         return toDto(saved);
     }
 
@@ -118,6 +137,8 @@ public class FlightService {
             throw new IllegalArgumentException("Укажите объяснение решения диспетчера");
         }
 
+        int oldTotalRisk = flight.getTotalRisk();
+        JsonNode oldWeather = captureFlightWeatherSnapshot(flight);
         Instant now = Instant.now();
 
         if (decision == DispatcherDecision.DELAY) {
@@ -140,6 +161,7 @@ public class FlightService {
         flight.setDispatcherDecisionAt(now);
 
         FlightEntity saved = flightRepository.save(flight);
+        saveFlightHistoryEvent(saved, oldTotalRisk, saved.getTotalRisk(), oldWeather, decision, reason, flight.getDispatcherDecisionDelayMinutes());
         return toDto(saved);
     }
 
@@ -234,8 +256,11 @@ public class FlightService {
             }
 
             try {
+                int oldTotalRisk = flight.getTotalRisk();
+                JsonNode oldWeather = captureFlightWeatherSnapshot(flight);
                 recalculateRisk(flight, now);
                 changed.add(flight);
+                saveFlightHistoryEvent(flight, oldTotalRisk, flight.getTotalRisk(), oldWeather, flight.getDispatcherDecision(), flight.getDispatcherDecisionReason(), flight.getDispatcherDecisionDelayMinutes());
             } catch (Exception ignored) {
                 // Keep old risk if weather API is temporarily unavailable.
             }
@@ -326,6 +351,58 @@ public class FlightService {
         }
 
         flight.setRiskUpdatedAt(now);
+        applyAutomaticDecision(flight, now);
+    }
+
+    private void applyAutomaticDecision(FlightEntity flight, Instant now) {
+        if (flight == null) {
+            return;
+        }
+
+        DispatcherDecision currentDecision = flight.getDispatcherDecision();
+        boolean isManualDecision = currentDecision != null
+                && currentDecision != DispatcherDecision.PENDING
+                && !isAutomaticDecisionReason(flight.getDispatcherDecisionReason());
+        if (isManualDecision) {
+            return;
+        }
+
+        int totalRisk = flight.getTotalRisk() == null ? 0 : flight.getTotalRisk();
+        DispatcherDecision nextDecision;
+        Integer nextDelayMinutes = null;
+        String nextReason;
+
+        if (totalRisk > AUTO_DELAY_MAX_RISK) {
+            nextDecision = DispatcherDecision.CANCEL;
+            nextReason = "AUTO: высокий риск, автоматическая отмена";
+        } else if (totalRisk > AUTO_APPROVE_MAX_RISK) {
+            nextDecision = DispatcherDecision.DELAY;
+            nextDelayMinutes = AUTO_DELAY_MINUTES;
+            nextReason = "AUTO: повышенный риск, автоматическая задержка";
+        } else {
+            nextDecision = DispatcherDecision.APPROVE;
+            nextReason = "AUTO: риск приемлем, автоматическое разрешение";
+        }
+
+        boolean changed = currentDecision != nextDecision
+                || !equalsNullable(flight.getDispatcherDecisionDelayMinutes(), nextDelayMinutes)
+                || !nextReason.equals(flight.getDispatcherDecisionReason());
+        if (!changed) {
+            return;
+        }
+
+        flight.setDispatcherDecision(nextDecision);
+        flight.setDispatcherDecisionDelayMinutes(nextDelayMinutes);
+        flight.setDispatcherDecisionReason(nextReason);
+        flight.setDispatcherDecisionAt(now);
+    }
+
+    private boolean isAutomaticDecisionReason(String reason) {
+        return reason != null && reason.startsWith("AUTO:");
+    }
+
+    private boolean equalsNullable(Integer left, Integer right) {
+        return left == null ? right == null : left.equals(right);
     }
 
     private FlightRiskDto evaluateSurfaceRisk(JsonNode weather) {
@@ -527,13 +604,24 @@ public class FlightService {
             throw new IllegalArgumentException("Номер рейса должен быть в формате IATA: 2 буквы и 1-4 цифры без ведущего нуля (пример: SU123)");
         }
 
+        LocalDateTime now = LocalDateTime.now();
         List<FlightEntity> flightsWithSameNumber = flightRepository.findAllByFlightNumber(normalizedFlightNumber);
-        boolean hasAnotherRouteForSameNumber = flightsWithSameNumber.stream().anyMatch(existing ->
-                !existing.getFromAirportId().equals(request.fromAirportId())
-                        || !existing.getToAirportId().equals(request.toAirportId())
-        );
-        if (hasAnotherRouteForSameNumber) {
-            throw new IllegalArgumentException("Один номер рейса может использоваться только для одного маршрута");
+        boolean hasActiveFlightWithSameNumber = flightsWithSameNumber.stream().anyMatch(existing -> {
+            LocalDateTime existingDeparture = existing.getDepartureAt();
+            LocalDateTime existingArrival = existing.getArrivalAt();
+            if (existingDeparture == null) {
+                return true;
+            }
+            if (existingDeparture.isAfter(now)) {
+                return true; // еще не вылетел
+            }
+            if (existingArrival == null) {
+                return true; // нет факта завершения
+            }
+            return existingArrival.isAfter(now); // в полете
+        });
+        if (hasActiveFlightWithSameNumber) {
+            throw new IllegalArgumentException("Этот номер рейса уже занят активным рейсом (не вылетел или в полете)");
         }
 
         if (flightRepository.existsByFlightNumberAndDepartureAt(normalizedFlightNumber, request.departureAt())) {
@@ -656,6 +744,49 @@ public class FlightService {
                 entity.getDispatcherDecisionAt(),
                 entity.getDispatcherDecisionDelayMinutes()
         );
+    }
+
+    private void saveFlightHistoryEvent(
+            FlightEntity flight,
+            Integer oldTotalRisk,
+            Integer newTotalRisk,
+            JsonNode oldWeather,
+            DispatcherDecision dispatcherDecision,
+            String dispatcherDecisionReason,
+            Integer dispatcherDecisionDelayMinutes
+    ) {
+        FlightHistoryEntity history = new FlightHistoryEntity();
+        history.setId("flight_history_" + Instant.now().toEpochMilli() + "_" + UUID.randomUUID().toString().substring(0, 8));
+        history.setFlightId(flight.getId());
+        history.setChangedAt(Instant.now());
+        history.setOldTotalRisk(oldTotalRisk);
+        history.setNewTotalRisk(newTotalRisk);
+        history.setOldWeather(oldWeather == null ? "" : oldWeather.toString());
+        history.setDispatcherDecision(dispatcherDecision == null ? DispatcherDecision.PENDING : dispatcherDecision);
+        history.setDispatcherDecisionReason(dispatcherDecisionReason == null ? "" : dispatcherDecisionReason);
+        history.setDispatcherDecisionDelayMinutes(dispatcherDecisionDelayMinutes);
+        flightHistoryRepository.save(history);
+    }
+
+    private FlightHistoryDto toHistoryDto(FlightHistoryEntity entity) {
+        return new FlightHistoryDto(
+                entity.getId(),
+                entity.getFlightId(),
+                entity.getChangedAt(),
+                entity.getOldTotalRisk(),
+                entity.getNewTotalRisk(),
+                entity.getOldWeather(),
+                entity.getDispatcherDecision().name(),
+                entity.getDispatcherDecisionReason(),
+                entity.getDispatcherDecisionDelayMinutes()
+        );
+    }
+
+    private JsonNode captureFlightWeatherSnapshot(FlightEntity flight) {
+        ObjectNode snapshot = objectMapper.createObjectNode();
+        snapshot.set("departure", weatherService.getWeatherByAirportId(flight.getFromAirportId()));
+        snapshot.set("arrival", weatherService.getWeatherByAirportId(flight.getToAirportId()));
+        return snapshot;
     }
 
     private String toJson(List<String> value) {

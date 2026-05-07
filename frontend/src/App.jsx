@@ -1,26 +1,27 @@
 import { useEffect, useState } from 'react'
-import { Button, Group, Paper, SimpleGrid, Stack, Text, Title } from '@mantine/core'
-import { IconRadar2, IconWind } from '@tabler/icons-react'
+import { Button, Group, Paper, SegmentedControl, Stack, Title } from '@mantine/core'
 import DispatcherPage from './features/dispatcher/ui/DispatcherPage'
 import MeteorologistPage from './features/dispatcher/ui/MeteorologistPage'
 import MeteorologistRequestPage from './features/dispatcher/ui/MeteorologistRequestPage'
 
-const ROLE_STORAGE_KEY = 'dispatcher-app-role'
+const SESSION_STORAGE_KEY = 'dispatcher-app-session'
 
-function readStoredRole() {
-  const savedRole = window.localStorage.getItem(ROLE_STORAGE_KEY)
-  if (savedRole === 'dispatcher' || savedRole === 'meteorologist') {
-    return savedRole
+function readSession() {
+  try {
+    const raw = window.localStorage.getItem(SESSION_STORAGE_KEY)
+    const parsed = raw ? JSON.parse(raw) : null
+    return parsed && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
   }
-  return null
 }
 
-function writeStoredRole(role) {
-  if (!role) {
-    window.localStorage.removeItem(ROLE_STORAGE_KEY)
+function writeSession(session) {
+  if (!session) {
+    window.localStorage.removeItem(SESSION_STORAGE_KEY)
     return
   }
-  window.localStorage.setItem(ROLE_STORAGE_KEY, role)
+  window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session))
 }
 
 function readHashRoute() {
@@ -49,7 +50,7 @@ function readHashRoute() {
 
   return {
     page: 'dispatcher',
-    tab: tab === 'flights' ? 'flights' : 'monitoring',
+    tab: tab === 'flights' || tab === 'analytics' ? tab : 'monitoring',
     prefill: null,
   }
 }
@@ -59,7 +60,10 @@ function navigateToDispatcher(tab = 'monitoring') {
     window.location.hash = '/?tab=flights'
     return
   }
-
+  if (tab === 'analytics') {
+    window.location.hash = '/?tab=analytics'
+    return
+  }
   window.location.hash = '/'
 }
 
@@ -76,35 +80,36 @@ function navigateToMeteorologistRequest(prefill) {
   window.location.hash = query ? `/meteorologist-request?${query}` : '/meteorologist-request'
 }
 
-function RoleChoiceScreen({ onChooseRole }) {
+function AuthScreen({ onAuthenticated }) {
+  const [role, setRole] = useState('dispatcher')
+
+  const handleSubmit = () => {
+    const normalizedRole = role === 'meteorologist' ? 'meteorologist' : 'dispatcher'
+    const session = {
+      login: normalizedRole,
+      name: normalizedRole === 'meteorologist' ? 'Метеоролог' : 'Диспетчер',
+      role: normalizedRole,
+      loggedAt: new Date().toISOString(),
+    }
+    writeSession(session)
+    onAuthenticated(session)
+  }
+
   return (
-    <Paper withBorder radius="xl" p="xl" className="surface-card" maw={900} mx="auto">
+    <Paper withBorder radius="xl" p="xl" className="surface-card" maw={560} mx="auto">
       <Stack gap="md">
-        <Title order={2}>Выберите роль</Title>
-        <Text c="dimmed">
-          Интерфейс и доступные кнопки будут показаны в зависимости от выбранной роли.
-        </Text>
-        <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
-          <Button
-            size="lg"
-            radius="xl"
-            variant="filled"
-            leftSection={<IconRadar2 size={18} />}
-            onClick={() => onChooseRole('dispatcher')}
-          >
-            Диспетчер
-          </Button>
-          <Button
-            size="lg"
-            radius="xl"
-            variant="light"
-            color="teal"
-            leftSection={<IconWind size={18} />}
-            onClick={() => onChooseRole('meteorologist')}
-          >
-            Метеоролог
-          </Button>
-        </SimpleGrid>
+        <Title order={2}>Быстрый вход</Title>
+        <SegmentedControl
+          value={role}
+          onChange={setRole}
+          data={[
+            { value: 'dispatcher', label: 'Диспетчер' },
+            { value: 'meteorologist', label: 'Метеоролог' },
+          ]}
+        />
+        <Button radius="xl" onClick={handleSubmit}>
+          Войти
+        </Button>
       </Stack>
     </Paper>
   )
@@ -112,52 +117,30 @@ function RoleChoiceScreen({ onChooseRole }) {
 
 function App() {
   const [route, setRoute] = useState(() => readHashRoute())
-  const [role, setRole] = useState(() => readStoredRole())
+  const [session, setSession] = useState(() => readSession())
 
   useEffect(() => {
-    const handleHashChange = () => {
-      setRoute(readHashRoute())
-    }
-
+    const handleHashChange = () => setRoute(readHashRoute())
     window.addEventListener('hashchange', handleHashChange)
     return () => window.removeEventListener('hashchange', handleHashChange)
   }, [])
 
-  useEffect(() => {
-    if (!window.location.hash && role === 'dispatcher') {
-      navigateToDispatcher()
-    }
-  }, [role])
-
-  const handleChooseRole = (nextRole) => {
-    setRole(nextRole)
-    writeStoredRole(nextRole)
-
-    if (nextRole === 'dispatcher') {
-      navigateToDispatcher()
-    } else {
-      window.location.hash = '/'
-    }
-  }
-
-  const handleResetRole = () => {
-    setRole(null)
-    writeStoredRole(null)
+  const handleLogout = () => {
+    setSession(null)
+    writeSession(null)
     window.location.hash = '/'
   }
 
-  if (!role) {
-    return <RoleChoiceScreen onChooseRole={handleChooseRole} />
+  if (!session) {
+    return <AuthScreen onAuthenticated={setSession} />
   }
 
-  if (role === 'meteorologist') {
+  if (session.role === 'meteorologist') {
     return (
       <Stack gap="md">
         <Group justify="space-between" wrap="wrap">
-          <Title order={3}>Роль: метеоролог</Title>
-          <Button variant="default" radius="xl" onClick={handleResetRole}>
-            Сменить роль
-          </Button>
+          <Title order={3}>Метеоролог ({session?.name || session?.login})</Title>
+          <Button variant="light" radius="xl" color="red" onClick={handleLogout}>Выйти</Button>
         </Group>
         <MeteorologistPage />
       </Stack>
@@ -176,9 +159,7 @@ function App() {
     return (
       <Stack gap="md">
         <Group justify="flex-end" wrap="wrap">
-          <Button variant="default" radius="xl" onClick={handleResetRole}>
-            Сменить роль
-          </Button>
+          <Button variant="light" radius="xl" color="red" onClick={handleLogout}>Выйти</Button>
         </Group>
         <MeteorologistRequestPage
           key={prefillKey}
@@ -193,9 +174,7 @@ function App() {
   return (
     <Stack gap="md">
       <Group justify="flex-end" wrap="wrap">
-        <Button variant="default" radius="xl" onClick={handleResetRole}>
-          Сменить роль
-        </Button>
+        <Button variant="light" radius="xl" color="red" onClick={handleLogout}>Выйти</Button>
       </Group>
       <DispatcherPage
         key={`dispatcher-${route.tab ?? 'monitoring'}`}
