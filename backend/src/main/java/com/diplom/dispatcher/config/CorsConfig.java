@@ -11,10 +11,10 @@ import java.util.stream.Stream;
 @Configuration
 public class CorsConfig implements WebMvcConfigurer {
 
-    private final List<String> allowedOrigins;
+    private final List<String> allowedOriginPatterns;
 
-    public CorsConfig(@Value("${app.cors.allowed-origins:http://localhost:5173}") String allowedOriginsRaw) {
-        this.allowedOrigins = Stream.of(allowedOriginsRaw.split(","))
+    public CorsConfig(@Value("${app.cors.allowed-origins:*}") String allowedOriginsRaw) {
+        this.allowedOriginPatterns = Stream.of(allowedOriginsRaw.split(","))
                 .map(String::trim)
                 .filter(value -> !value.isBlank())
                 .toList();
@@ -23,7 +23,7 @@ public class CorsConfig implements WebMvcConfigurer {
     @Override
     public void addCorsMappings(CorsRegistry registry) {
         registry.addMapping("/api/**")
-                .allowedOrigins(allowedOrigins.toArray(new String[0]))
+                .allowedOriginPatterns(allowedOriginPatterns.toArray(new String[0]))
                 .allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
                 .allowedHeaders("*")
                 .allowCredentials(false);
