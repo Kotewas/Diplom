@@ -69,7 +69,9 @@ export default function MeteorologistPage({ onBack, backLabel = 'К таблиц
   const [activeNotificationId, setActiveNotificationId] = useState('')
   const [selectedRequest, setSelectedRequest] = useState(null)
   const [responseByNeed, setResponseByNeed] = useState({})
+  const [meteorologistMessage, setMeteorologistMessage] = useState('')
   const [submitStatus, setSubmitStatus] = useState('')
+  const [submitStatusColor, setSubmitStatusColor] = useState('teal')
   const [notificationTab, setNotificationTab] = useState('unread')
 
   const requestedNeeds = useMemo(
@@ -117,6 +119,8 @@ export default function MeteorologistPage({ onBack, backLabel = 'К таблиц
     const request = resolveRequestForNotification(updatedNotification, nextLog)
     setSelectedRequest(request)
     setResponseByNeed(createResponseDraft(request))
+    setMeteorologistMessage(request?.meteorologistMessage ?? '')
+    setSubmitStatusColor('teal')
     setSubmitStatus('')
   }
 
@@ -130,16 +134,38 @@ export default function MeteorologistPage({ onBack, backLabel = 'К таблиц
   const handleSubmitResponse = () => {
     if (!selectedRequest) return
 
-    const updatedRequest = updateActiveMeteorologistResponse(responseByNeed)
+    const hasAnyResponse = Object.values(responseByNeed).some(
+      (value) => typeof value === 'string' && value.trim(),
+    )
+    const hasMessage = meteorologistMessage.trim().length > 0
+    if (!hasAnyResponse && !hasMessage) {
+      setSubmitStatusColor('orange')
+      setSubmitStatus('Заполните хотя бы один параметр или сообщение диспетчеру.')
+      return
+    }
+
+    const updatedRequest = updateActiveMeteorologistResponse(responseByNeed, meteorologistMessage)
     if (!updatedRequest) {
+      setSubmitStatusColor('orange')
       setSubmitStatus('Этот запрос уже закрыт или не активен.')
       return
     }
 
-    setChatLog(readMeteorologistChatLog())
-    setSelectedRequest(null)
-    setActiveNotificationId('')
-    setResponseByNeed({})
+    const nextLog = readMeteorologistChatLog()
+    const sentNotification = nextLog.find(
+      (item) =>
+        item.direction === 'outgoing' &&
+        item.messageType === 'meteorologist_response' &&
+        item.requestId === updatedRequest.id,
+    )
+
+    setChatLog(nextLog)
+    setNotificationTab('sent')
+    setSelectedRequest(updatedRequest)
+    setActiveNotificationId(sentNotification?.id ?? '')
+    setResponseByNeed(createResponseDraft(updatedRequest))
+    setMeteorologistMessage(updatedRequest.meteorologistMessage ?? '')
+    setSubmitStatusColor('teal')
     setSubmitStatus(
       `Ответ отправлен диспетчеру ${updatedRequest.dispatcherName || 'Диспетчер'} в ${formatDateTime(updatedRequest.answeredAt)}.`,
     )
@@ -235,19 +261,27 @@ export default function MeteorologistPage({ onBack, backLabel = 'К таблиц
                               minRows={3}
                               autosize
                               value={responseByNeed[need.key] ?? ''}
-                              placeholder={need.placeholder}
+                              description={need.placeholder}
                               readOnly={isRequestAnswered}
                               onChange={(event) => updateNeedValue(need.key, event.target.value)}
-                              error={!isRequestAnswered && responseValidation.fieldsMissing[need.key] ? 'Обязательное поле' : ''}
-                              styles={{
-                                input: {
-                                  borderColor: !isRequestAnswered && responseValidation.fieldsMissing[need.key] ? 'var(--mantine-color-red-6)' : undefined,
-                                },
-                              }}
                             />
                           </div>
                         ))}
                       </SimpleGrid>
+                    </Stack>
+                  </Paper>
+
+                  <Paper withBorder radius="lg" p="md" className="surface-card surface-card--subtle">
+                    <Stack gap="sm">
+                      <Title order={4}>Сообщение диспетчеру</Title>
+                      <Textarea
+                        minRows={3}
+                        autosize
+                        value={meteorologistMessage}
+                        description="Кратко укажите важные замечания, ограничения или рекомендацию для диспетчера."
+                        readOnly={isRequestAnswered}
+                        onChange={(event) => setMeteorologistMessage(event.target.value)}
+                      />
                     </Stack>
                   </Paper>
 
@@ -265,7 +299,7 @@ export default function MeteorologistPage({ onBack, backLabel = 'К таблиц
                             : 'Отправить неполные метеоданные диспетчеру'}
                         </Button>
                         {submitStatus && (
-                          <Alert color="teal" radius="md" variant="light">
+                          <Alert color={submitStatusColor} radius="md" variant="light">
                             {submitStatus}
                           </Alert>
                         )}

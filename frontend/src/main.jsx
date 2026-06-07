@@ -4,6 +4,8 @@ import { MantineProvider, createTheme } from '@mantine/core'
 import '@mantine/core/styles.css'
 import './index.css'
 import App from './App.jsx'
+import { AppErrorBoundary } from './shared/ui/AppErrorBoundary.jsx'
+import { ToastProvider } from './shared/ui/ToastProvider.jsx'
 
 const theme = createTheme({
   fontFamily: '"Manrope", "IBM Plex Sans", "Segoe UI", sans-serif',
@@ -22,7 +24,11 @@ createRoot(document.getElementById('root')).render(
       theme={theme}
       defaultColorScheme="light"
     >
-      <App />
+      <AppErrorBoundary>
+        <ToastProvider>
+          <App />
+        </ToastProvider>
+      </AppErrorBoundary>
     </MantineProvider>
   </StrictMode>,
 )

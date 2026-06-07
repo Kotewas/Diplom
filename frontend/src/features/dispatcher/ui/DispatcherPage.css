@@ -365,7 +365,7 @@
 }
 
 .flight-row--departed {
-  cursor: default;
+  cursor: pointer;
   opacity: 0.86;
 }
 

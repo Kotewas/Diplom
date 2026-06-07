@@ -41,7 +41,7 @@ export function readActiveMeteorologistRequest() {
   }
 }
 
-export function updateActiveMeteorologistResponse(responseByNeed) {
+export function updateActiveMeteorologistResponse(responseByNeed, meteorologistMessage = '') {
   const activeRequest = readActiveMeteorologistRequest()
   if (!activeRequest) return null
 
@@ -64,6 +64,7 @@ export function updateActiveMeteorologistResponse(responseByNeed) {
     status: 'answered',
     answeredAt,
     responseByNeed,
+    meteorologistMessage: String(meteorologistMessage ?? '').trim(),
     responseComplete,
     emptyFieldsCount: emptyCount,
   }

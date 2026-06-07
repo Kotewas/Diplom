@@ -125,35 +125,50 @@ export default function MeteorologistRequestPage({ initialValues, onBack, onSent
               label="Номер рейса"
               placeholder="SU1234"
               value={form.flightNumber}
-              onChange={(event) => setForm((prev) => ({ ...prev, flightNumber: event.target.value }))}
+              onChange={(event) => {
+                const flightNumber = event.target.value
+                setForm((prev) => ({ ...prev, flightNumber }))
+              }}
             />
 
             <TextInput
               label="Аэропорт вылета (ICAO/IATA)"
               placeholder="UUEE / SVO"
               value={form.fromAirportId}
-              onChange={(event) => setForm((prev) => ({ ...prev, fromAirportId: event.target.value }))}
+              onChange={(event) => {
+                const fromAirportId = event.target.value
+                setForm((prev) => ({ ...prev, fromAirportId }))
+              }}
             />
 
             <TextInput
               label="Аэропорт назначения"
               placeholder="UUDD / DME"
               value={form.toAirportId}
-              onChange={(event) => setForm((prev) => ({ ...prev, toAirportId: event.target.value }))}
+              onChange={(event) => {
+                const toAirportId = event.target.value
+                setForm((prev) => ({ ...prev, toAirportId }))
+              }}
             />
 
             <TextInput
               label="Плановое время вылета (ETD)"
               type="datetime-local"
               value={form.etd}
-              onChange={(event) => setForm((prev) => ({ ...prev, etd: event.target.value }))}
+              onChange={(event) => {
+                const etd = event.target.value
+                setForm((prev) => ({ ...prev, etd }))
+              }}
             />
 
             <TextInput
               label="Плановое время прилета (ETA)"
               type="datetime-local"
               value={form.eta}
-              onChange={(event) => setForm((prev) => ({ ...prev, eta: event.target.value }))}
+              onChange={(event) => {
+                const eta = event.target.value
+                setForm((prev) => ({ ...prev, eta }))
+              }}
             />
           </SimpleGrid>
 
@@ -178,7 +193,10 @@ export default function MeteorologistRequestPage({ initialValues, onBack, onSent
             minRows={3}
             autosize
             value={form.dispatcherComment}
-            onChange={(event) => setForm((prev) => ({ ...prev, dispatcherComment: event.target.value }))}
+            onChange={(event) => {
+              const dispatcherComment = event.target.value
+              setForm((prev) => ({ ...prev, dispatcherComment }))
+            }}
             placeholder="Например: подтвердить условия по маршруту за 30 минут до ETD."
           />
 
