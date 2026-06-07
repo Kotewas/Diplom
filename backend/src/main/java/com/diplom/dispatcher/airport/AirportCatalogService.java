@@ -24,6 +24,7 @@ public class AirportCatalogService {
     };
     private static final Pattern MULTI_SPACES = Pattern.compile("\\s+");
     private static final Pattern LATIN_OR_DIGITS = Pattern.compile("[A-Za-z0-9]");
+    private static final Pattern HELIPORT_NAME = Pattern.compile("(?iu).*вертол[её]тная\\s+площадка.*");
     private static final List<String> CITY_BANNED_TOKENS = List.of(
             "лнг", "lng", "проиект", "project", "фиелд", "field", "гас", "gas"
     );
@@ -174,6 +175,9 @@ public class AirportCatalogService {
             return null;
         }
         if (region != null && region.equalsIgnoreCase("Казахстан")) {
+            return null;
+        }
+        if (id.startsWith("RU-TVR-") || HELIPORT_NAME.matcher(name).matches()) {
             return null;
         }
 

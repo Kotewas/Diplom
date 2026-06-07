@@ -305,7 +305,7 @@ public class FlightService {
         if (hours < 24) {
             return Duration.ofHours(6);
         }
-        return Duration.ofHours(24);
+        return Duration.ofHours(12);
     }
 
     private void recalculateRisk(FlightEntity flight, Instant now) {
