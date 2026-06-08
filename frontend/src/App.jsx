@@ -67,6 +67,15 @@ function navigateToDispatcher(tab = 'monitoring') {
   window.location.hash = '/'
 }
 
+function replaceDispatcherHash(tab = 'monitoring') {
+  const nextHash = tab === 'flights'
+    ? '#/?tab=flights'
+    : tab === 'analytics'
+    ? '#/?tab=analytics'
+    : '#/'
+  window.history.replaceState(null, '', nextHash)
+}
+
 function navigateToMeteorologistRequest(prefill) {
   const params = new URLSearchParams()
 
@@ -118,6 +127,7 @@ function AuthScreen({ onAuthenticated }) {
 function App() {
   const [route, setRoute] = useState(() => readHashRoute())
   const [session, setSession] = useState(() => readSession())
+  const [dispatcherNotice, setDispatcherNotice] = useState(null)
 
   useEffect(() => {
     const handleHashChange = () => setRoute(readHashRoute())
@@ -165,7 +175,14 @@ function App() {
           key={prefillKey}
           initialValues={route.prefill}
           onBack={() => navigateToDispatcher('flights')}
-          onSent={() => navigateToDispatcher()}
+          onSent={(request) => {
+            setDispatcherNotice({
+              type: 'success',
+              title: 'Запрос метеорологу отправлен',
+              message: `${request?.flightNumber || 'Рейс'}: метеоролог получил запрос.`,
+            })
+            navigateToDispatcher()
+          }}
         />
       </Stack>
     )
@@ -179,6 +196,9 @@ function App() {
       <DispatcherPage
         key={`dispatcher-${route.tab ?? 'monitoring'}`}
         initialTab={route.tab}
+        dispatcherNotice={dispatcherNotice}
+        onDispatcherNoticeShown={() => setDispatcherNotice(null)}
+        onTabUrlChange={replaceDispatcherHash}
         onRequestMeteorologist={navigateToMeteorologistRequest}
       />
     </Stack>

@@ -1,6 +1,16 @@
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
 export const WEATHER_TTL_MS = 10 * 60 * 1000
 
+export function getWebSocketUrl(path) {
+  const baseUrl = API_BASE_URL || window.location.origin
+  const normalizedBase = new URL(baseUrl, window.location.origin)
+  normalizedBase.protocol = normalizedBase.protocol === 'https:' ? 'wss:' : 'ws:'
+  normalizedBase.pathname = path
+  normalizedBase.search = ''
+  normalizedBase.hash = ''
+  return normalizedBase.toString()
+}
+
 export const AIRCRAFT_MODELS = [
   'Airbus A320',
   'Airbus A321',

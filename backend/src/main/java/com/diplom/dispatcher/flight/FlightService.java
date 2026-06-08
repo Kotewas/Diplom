@@ -2,11 +2,14 @@ package com.diplom.dispatcher.flight;
 
 import com.diplom.dispatcher.airport.AirportCatalogService;
 import com.diplom.dispatcher.airport.AirportDto;
+import com.diplom.dispatcher.realtime.AppUpdateWebSocketHandler;
 import com.diplom.dispatcher.weather.WeatherService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -14,9 +17,13 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.util.Comparator;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -24,6 +31,12 @@ import java.util.regex.Pattern;
 public class FlightService {
 
     private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {
+    };
+    private static final TypeReference<Map<String, Boolean>> BOOLEAN_MAP = new TypeReference<>() {
+    };
+    private static final TypeReference<Map<String, String>> STRING_MAP = new TypeReference<>() {
+    };
+    private static final TypeReference<List<MeteorologistRequestDto>> METEOROLOGIST_REQUEST_LIST = new TypeReference<>() {
     };
     private static final double EARTH_RADIUS_KM = 6371.0;
     private static final String AIRCRAFT_TYPE_AIRPLANE = "AIRPLANE";
@@ -36,6 +49,18 @@ public class FlightService {
     private static final long HELICOPTER_MIN_TOTAL_FLIGHT_MINUTES = 18;
     private static final Pattern AIRPLANE_FLIGHT_NUMBER_PATTERN = Pattern.compile("^[A-Z]{2}[1-9][0-9]{0,3}$");
     private static final Pattern HELICOPTER_FLIGHT_NUMBER_PATTERN = Pattern.compile("^H[1-9][0-9]{0,3}$");
+    private static final Pattern AVIATION_WIND_PATTERN = Pattern.compile("\\b(?<dir>\\d{3}|VRB)(?<speed>\\d{2,3})(?:G(?<gust>\\d{2,3}))?(?<unit>MPS|KT)\\b");
+    private static final Pattern AVIATION_VISIBILITY_PATTERN = Pattern.compile("\\b(?<visibility>\\d{4})\\b");
+    private static final Pattern AVIATION_PRESSURE_PATTERN = Pattern.compile("\\bQ(?<pressure>\\d{4})\\b");
+    private static final Pattern AVIATION_TEMP_PATTERN = Pattern.compile("\\b(?<temp>M?\\d{2})/(?<dew>M?\\d{2})\\b");
+    private static final Pattern AVIATION_CLOUD_PATTERN = Pattern.compile("\\b(?<cloud>FEW|SCT|BKN|OVC|VV)(?<height>\\d{3}|///)?(?:CB|TCU)?\\b");
+    private static final Pattern WIND_SPEED_TEXT_PATTERN = Pattern.compile("(?i)(?<speed>\\d{1,2}(?:[.,]\\d+)?)\\s*(?<unit>м/с|m/s|mps|kt|kts|узл?|узлов)");
+    private static final Pattern AVIATION_ICAO_PATTERN = Pattern.compile("\\b[A-Z]{4}\\b");
+    private static final Pattern AVIATION_TIME_PATTERN = Pattern.compile("\\b\\d{6}Z\\b");
+    private static final Pattern TAF_PERIOD_PATTERN = Pattern.compile("\\b\\d{4}/\\d{4}\\b");
+    private static final Pattern LANDING_WIND_TEXT_PATTERN = Pattern.compile("(?iu)\\b(?:\\d{3}|VRB)\\s*(?:°|град(?:ус(?:ов|а)?)?|deg(?:rees?)?)?\\s*\\d{1,2}(?:[.,]\\d+)?\\s*(?:м/с|m/s|mps|kt|kts|узл?|узлов)");
+    private static final Pattern LANDING_GUST_TEXT_PATTERN = Pattern.compile("(?iu)\\b(?:(?:G|порыв\\w*\\s*(?:до)?|до)\\s*)?\\d{1,2}(?:[.,]\\d+)?\\s*(?:м/с|m/s|mps|kt|kts|узл?|узлов)");
+    private static final Pattern LANDING_VISIBILITY_TEXT_PATTERN = Pattern.compile("\\b\\d{3,5}\\b");
     private static final int MIN_DELAY_MINUTES = 5;
     private static final int MAX_DELAY_MINUTES = 360;
     private static final int AUTO_APPROVE_MAX_RISK = 45;
@@ -47,19 +72,22 @@ public class FlightService {
     private final AirportCatalogService airportCatalogService;
     private final WeatherService weatherService;
     private final ObjectMapper objectMapper;
+    private final AppUpdateWebSocketHandler appUpdateWebSocketHandler;
 
     public FlightService(
             FlightRepository flightRepository,
             FlightHistoryRepository flightHistoryRepository,
             AirportCatalogService airportCatalogService,
             WeatherService weatherService,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            AppUpdateWebSocketHandler appUpdateWebSocketHandler
     ) {
         this.flightRepository = flightRepository;
         this.flightHistoryRepository = flightHistoryRepository;
         this.airportCatalogService = airportCatalogService;
         this.weatherService = weatherService;
         this.objectMapper = objectMapper;
+        this.appUpdateWebSocketHandler = appUpdateWebSocketHandler;
     }
 
     public List<FlightDto> getAllFlights() {
@@ -96,21 +124,28 @@ public class FlightService {
         entity.setFromAirportId(request.fromAirportId());
         entity.setToAirportId(request.toAirportId());
 
-        entity.setDepartureRiskScore(request.departureRisk().score());
-        entity.setArrivalRiskScore(request.arrivalRisk().score());
-        entity.setCruiseRiskScore(request.cruiseRisk().score());
-        entity.setTotalRisk(request.totalRisk());
+        FlightRiskDto departureRisk = request.departureRisk();
+        FlightRiskDto arrivalRisk = request.arrivalRisk();
+        FlightRiskDto cruiseRisk = withDepartureTimeFactors(request.cruiseRisk(), request.departureAt(), LocalDateTime.now());
+        int totalRisk = calculateTotalRisk(departureRisk, arrivalRisk, cruiseRisk);
+        FeasibilityDto feasibility = getFeasibility(totalRisk);
 
-        entity.setDepartureRiskFactors(toJson(request.departureRisk().factors()));
-        entity.setArrivalRiskFactors(toJson(request.arrivalRisk().factors()));
-        entity.setCruiseRiskFactors(toJson(request.cruiseRisk().factors()));
+        entity.setDepartureRiskScore(departureRisk.score());
+        entity.setArrivalRiskScore(arrivalRisk.score());
+        entity.setCruiseRiskScore(cruiseRisk.score());
+        entity.setTotalRisk(totalRisk);
 
-        entity.setFeasibilityLabel(request.feasibility().label());
-        entity.setFeasibilityClassName(request.feasibility().className());
+        entity.setDepartureRiskFactors(toJson(departureRisk.factors()));
+        entity.setArrivalRiskFactors(toJson(arrivalRisk.factors()));
+        entity.setCruiseRiskFactors(toJson(cruiseRisk.factors()));
+
+        entity.setFeasibilityLabel(feasibility.label());
+        entity.setFeasibilityClassName(feasibility.className());
         entity.setRiskUpdatedAt(now);
         applyAutomaticDecision(entity, now);
 
         FlightEntity saved = flightRepository.save(entity);
+        broadcastFlightUpdate("FLIGHT_CREATED", saved);
         return toDto(saved);
     }
 
@@ -121,7 +156,50 @@ public class FlightService {
         recalculateRisk(flight, Instant.now());
         FlightEntity saved = flightRepository.save(flight);
         saveFlightHistoryEvent(saved, oldTotalRisk, saved.getTotalRisk(), oldWeather, saved.getDispatcherDecision(), saved.getDispatcherDecisionReason(), saved.getDispatcherDecisionDelayMinutes());
+        broadcastFlightUpdate("FLIGHT_RISK_REFRESHED", saved);
         return toDto(saved);
+    }
+
+    @Transactional
+    public List<FlightDto> refreshAllRisksNow() {
+        List<FlightEntity> flights = flightRepository.findAllByOrderByCreatedAtDesc();
+        if (flights.isEmpty()) {
+            return List.of();
+        }
+
+        Instant now = Instant.now();
+        List<FlightEntity> refreshed = new ArrayList<>();
+        for (FlightEntity flight : flights) {
+            LocalDateTime arrivalAt = flight.getArrivalAt();
+            if (arrivalAt != null && !arrivalAt.isAfter(LocalDateTime.now())) {
+                continue;
+            }
+            try {
+                int oldTotalRisk = flight.getTotalRisk() == null ? 0 : flight.getTotalRisk();
+                JsonNode oldWeather = captureFlightWeatherSnapshot(flight);
+                recalculateRisk(flight, now);
+                saveFlightHistoryEvent(
+                        flight,
+                        oldTotalRisk,
+                        flight.getTotalRisk(),
+                        oldWeather,
+                        flight.getDispatcherDecision(),
+                        "Массовый перерасчет риска по актуальной формуле",
+                        flight.getDispatcherDecisionDelayMinutes()
+                );
+                refreshed.add(flight);
+            } catch (Exception ignored) {
+                // Keep other flights refreshable even if one route/weather point fails.
+            }
+        }
+
+        if (refreshed.isEmpty()) {
+            return List.of();
+        }
+
+        List<FlightEntity> saved = flightRepository.saveAll(refreshed);
+        appUpdateWebSocketHandler.broadcast("FLIGHT_RISKS_REFRESHED", "all", String.valueOf(saved.size()));
+        return saved.stream().map(this::toDto).toList();
     }
 
     public FlightDto applyDispatcherDecision(String flightId, ApplyDecisionRequest request) {
@@ -162,6 +240,7 @@ public class FlightService {
 
         FlightEntity saved = flightRepository.save(flight);
         saveFlightHistoryEvent(saved, oldTotalRisk, saved.getTotalRisk(), oldWeather, decision, reason, flight.getDispatcherDecisionDelayMinutes());
+        broadcastFlightUpdate("FLIGHT_DECISION_APPLIED", saved);
         return toDto(saved);
     }
 
@@ -225,20 +304,129 @@ public class FlightService {
         );
     }
 
+    public List<MeteorologistRequestDto> getMeteorologistRequests() {
+        return flightRepository.findAllByMeteorologistRequestIdIsNotNullOrderByMeteorologistRequestCreatedAtDesc().stream()
+                .flatMap((flight) -> {
+                    List<MeteorologistRequestDto> requests = new ArrayList<>();
+                    MeteorologistRequestDto current = toMeteorologistRequestDto(flight);
+                    if (current.id() != null && !current.id().isBlank()) {
+                        requests.add(current);
+                    }
+                    requests.addAll(fromMeteorologistRequestHistory(flight.getMeteorologistRequestHistory()));
+                    return requests.stream();
+                })
+                .sorted(Comparator.comparing(
+                        MeteorologistRequestDto::createdAt,
+                        Comparator.nullsLast(Comparator.reverseOrder())
+                ))
+                .toList();
+    }
+
+    @Transactional
+    public MeteorologistRequestDto createMeteorologistRequest(CreateMeteorologistRequest request) {
+        FlightEntity flight = findFlightForMeteorologistRequest(request);
+        Instant now = Instant.now();
+        Map<String, Boolean> needs = request.needs() == null || request.needs().isEmpty()
+                ? defaultMeteorologistNeeds()
+                : new LinkedHashMap<>(request.needs());
+
+        archiveCurrentMeteorologistRequest(flight);
+        flight.setMeteorologistRequestId(resolveMeteorologistRequestId(flight, request));
+        flight.setMeteorologistRequestStatus("new");
+        flight.setMeteorologistRequestCreatedAt(now);
+        flight.setMeteorologistDispatcherName(blankToDefault(request.dispatcherName(), "Диспетчер рейсов"));
+        flight.setMeteorologistDispatcherComment(blankToDefault(request.dispatcherComment(), ""));
+        flight.setMeteorologistRequestNeeds(toJsonMap(needs));
+        flight.setMeteorologistRequestText(blankToDefault(request.requestText(), buildMeteorologistRequestText(request, needs)));
+        flight.setMeteorologistResponseByNeed(toJsonMap(Map.of()));
+        flight.setMeteorologistMessage("");
+        flight.setMeteorologistResponseComplete(null);
+        flight.setMeteorologistEmptyFieldsCount(null);
+        flight.setMeteorologistAnsweredAt(null);
+
+        FlightEntity saved = flightRepository.save(flight);
+        appUpdateWebSocketHandler.broadcast(
+                "METEOROLOGIST_REQUEST_CREATED",
+                saved.getMeteorologistRequestId(),
+                saved.getFlightNumber()
+        );
+        return toMeteorologistRequestDto(saved);
+    }
+
+    @Transactional
+    public MeteorologistRequestDto submitMeteorologistResponse(
+            String requestId,
+            SubmitMeteorologistResponseRequest request
+    ) {
+        FlightEntity flight = flightRepository.findAllByMeteorologistRequestId(requestId).stream()
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("Запрос метеорологу не найден: " + requestId));
+
+        int oldTotalRisk = flight.getTotalRisk() == null ? 0 : flight.getTotalRisk();
+        JsonNode oldWeather = captureFlightWeatherSnapshot(flight);
+        Map<String, Boolean> needs = fromBooleanMapJson(flight.getMeteorologistRequestNeeds());
+        Map<String, String> responseByNeed = request.responseByNeed() == null
+                ? Map.of()
+                : new LinkedHashMap<>(request.responseByNeed());
+        validateMeteorologistResponseFormat(responseByNeed);
+        long emptyFieldsCount = needs.entrySet().stream()
+                .filter(Map.Entry::getValue)
+                .map(Map.Entry::getKey)
+                .filter((key) -> {
+                    String value = responseByNeed.get(key);
+                    return value == null || value.trim().isBlank();
+                })
+                .count();
+
+        flight.setMeteorologistRequestStatus("answered");
+        flight.setMeteorologistResponseByNeed(toJsonMap(responseByNeed));
+        flight.setMeteorologistMessage(blankToDefault(request.meteorologistMessage(), ""));
+        flight.setMeteorologistResponseComplete(emptyFieldsCount == 0);
+        flight.setMeteorologistEmptyFieldsCount((int) emptyFieldsCount);
+        Instant now = Instant.now();
+        flight.setMeteorologistAnsweredAt(now);
+        recalculateRiskFromMeteorologist(flight, responseByNeed, now);
+
+        FlightEntity saved = flightRepository.save(flight);
+        saveFlightHistoryEvent(
+                saved,
+                oldTotalRisk,
+                saved.getTotalRisk(),
+                oldWeather,
+                saved.getDispatcherDecision(),
+                "Перерасчет по данным метеоролога: " + blankToDefault(request.meteorologistMessage(), "METAR/TAF и уточняющие параметры"),
+                saved.getDispatcherDecisionDelayMinutes()
+        );
+        appUpdateWebSocketHandler.broadcast(
+                "METEOROLOGIST_RESPONSE_SUBMITTED",
+                saved.getMeteorologistRequestId(),
+                saved.getFlightNumber()
+        );
+        broadcastFlightUpdate("FLIGHT_RISK_REFRESHED", saved);
+        return toMeteorologistRequestDto(saved);
+    }
+
     @Transactional
     public void cancelFlight(String flightId) {
         if (!flightRepository.existsById(flightId)) {
             throw new IllegalArgumentException("Рейс не найден: " + flightId);
         }
 
+        FlightEntity flight = findFlightOrThrow(flightId);
         flightRepository.deleteById(flightId);
         flightRepository.flush();
+        appUpdateWebSocketHandler.broadcast("FLIGHT_DELETED", flightId, flight.getFlightNumber());
     }
 
     @Scheduled(fixedDelayString = "${app.risk-refresh.tick-ms:3600000}")
     public void refreshDueFlightRisksBySchedule() {
         List<FlightEntity> flights = flightRepository.findAllByOrderByCreatedAtDesc();
         refreshDueFlightRisks(flights);
+    }
+
+    @EventListener(ApplicationReadyEvent.class)
+    public void refreshExistingFlightRisksOnStartup() {
+        refreshAllRisksNow();
     }
 
     private void refreshDueFlightRisks(List<FlightEntity> flights) {
@@ -268,12 +456,41 @@ public class FlightService {
 
         if (!changed.isEmpty()) {
             flightRepository.saveAll(changed);
+            appUpdateWebSocketHandler.broadcast("FLIGHT_RISKS_REFRESHED", "scheduled", String.valueOf(changed.size()));
         }
     }
 
     private FlightEntity findFlightOrThrow(String flightId) {
         return flightRepository.findById(flightId)
                 .orElseThrow(() -> new IllegalArgumentException("Рейс не найден: " + flightId));
+    }
+
+    private void broadcastFlightUpdate(String type, FlightEntity flight) {
+        if (flight == null) return;
+        appUpdateWebSocketHandler.broadcast(type, flight.getId(), flight.getFlightNumber());
+    }
+
+    private FlightEntity findFlightForMeteorologistRequest(CreateMeteorologistRequest request) {
+        String normalizedFlightNumber = normalizeFlightNumber(request.flightNumber());
+        if (normalizedFlightNumber.isBlank()) {
+            throw new IllegalArgumentException("Укажите номер рейса для запроса метеорологу");
+        }
+
+        List<FlightEntity> candidates = flightRepository.findAllByFlightNumber(normalizedFlightNumber);
+        if (candidates.isEmpty()) {
+            throw new IllegalArgumentException("Сначала создайте рейс, затем отправляйте запрос метеорологу: " + normalizedFlightNumber);
+        }
+
+        String fromAirportId = normalizeAirportId(request.fromAirportId());
+        String toAirportId = normalizeAirportId(request.toAirportId());
+        LocalDateTime etd = request.etd();
+
+        return candidates.stream()
+                .filter((flight) -> fromAirportId.isBlank() || Objects.equals(normalizeAirportId(flight.getFromAirportId()), fromAirportId))
+                .filter((flight) -> toAirportId.isBlank() || Objects.equals(normalizeAirportId(flight.getToAirportId()), toAirportId))
+                .filter((flight) -> etd == null || Objects.equals(flight.getDepartureAt(), etd))
+                .findFirst()
+                .orElseGet(() -> candidates.get(0));
     }
 
     private boolean isRiskRefreshDue(FlightEntity flight, Instant now, LocalDateTime nowLocal) {
@@ -305,7 +522,7 @@ public class FlightService {
         if (hours < 24) {
             return Duration.ofHours(6);
         }
-        return Duration.ofHours(12);
+        return Duration.ofHours(24);
     }
 
     private void recalculateRisk(FlightEntity flight, Instant now) {
@@ -320,6 +537,7 @@ public class FlightService {
         FlightRiskDto departureRisk = evaluateSurfaceRisk(depWeather);
         FlightRiskDto arrivalRisk = evaluateSurfaceRisk(arrWeather);
         FlightRiskDto cruiseRisk = evaluateCruiseRisk(fromAirport, toAirport, depWeather, arrWeather);
+        cruiseRisk = withDepartureTimeFactors(cruiseRisk, flight.getDepartureAt(), LocalDateTime.now());
 
         int totalRisk = clampScore(
                 departureRisk.score() * 0.4
@@ -352,6 +570,349 @@ public class FlightService {
 
         flight.setRiskUpdatedAt(now);
         applyAutomaticDecision(flight, now);
+    }
+
+    private void recalculateRiskFromMeteorologist(
+            FlightEntity flight,
+            Map<String, String> responseByNeed,
+            Instant now
+    ) {
+        AirportDto fromAirport = airportCatalogService.getById(flight.getFromAirportId())
+                .orElseThrow(() -> new IllegalArgumentException("Airport is not found: " + flight.getFromAirportId()));
+        AirportDto toAirport = airportCatalogService.getById(flight.getToAirportId())
+                .orElseThrow(() -> new IllegalArgumentException("Airport is not found: " + flight.getToAirportId()));
+
+        JsonNode fallbackDepartureWeather = weatherService.getWeatherByAirportId(flight.getFromAirportId());
+        JsonNode fallbackArrivalWeather = weatherService.getWeatherByAirportId(flight.getToAirportId());
+        JsonNode metarWeather = parseAviationWeather(responseByNeed.get("metar"), fallbackDepartureWeather, "METAR");
+        JsonNode tafWeather = parseAviationWeather(responseByNeed.get("taf"), fallbackArrivalWeather, "TAF");
+
+        JsonNode departureWeather = metarWeather == null ? fallbackDepartureWeather : metarWeather;
+        JsonNode arrivalWeather = tafWeather == null
+                ? (metarWeather == null ? fallbackArrivalWeather : metarWeather)
+                : tafWeather;
+
+        FlightRiskDto departureRisk = withMeteorologistSurfaceFactors(
+                evaluateSurfaceRisk(departureWeather),
+                responseByNeed,
+                false
+        );
+        FlightRiskDto arrivalRisk = withMeteorologistSurfaceFactors(
+                evaluateSurfaceRisk(arrivalWeather),
+                responseByNeed,
+                true
+        );
+        FlightRiskDto cruiseRisk = withMeteorologistCruiseFactors(
+                evaluateCruiseRisk(fromAirport, toAirport, departureWeather, arrivalWeather),
+                responseByNeed
+        );
+        cruiseRisk = withDepartureTimeFactors(cruiseRisk, flight.getDepartureAt(), LocalDateTime.now());
+
+        int totalRisk = clampScore(
+                departureRisk.score() * 0.4
+                        + arrivalRisk.score() * 0.4
+                        + cruiseRisk.score() * 0.2
+        );
+        FeasibilityDto feasibility = getFeasibility(totalRisk);
+
+        flight.setDepartureRiskScore(departureRisk.score());
+        flight.setArrivalRiskScore(arrivalRisk.score());
+        flight.setCruiseRiskScore(cruiseRisk.score());
+        flight.setTotalRisk(totalRisk);
+        flight.setDepartureRiskFactors(toJson(departureRisk.factors()));
+        flight.setArrivalRiskFactors(toJson(arrivalRisk.factors()));
+        flight.setCruiseRiskFactors(toJson(cruiseRisk.factors()));
+        flight.setFeasibilityLabel(feasibility.label());
+        flight.setFeasibilityClassName(feasibility.className());
+        flight.setRiskUpdatedAt(now);
+        applyAutomaticDecision(flight, now);
+    }
+
+    private JsonNode parseAviationWeather(String rawReport, JsonNode fallbackWeather, String reportType) {
+        if (rawReport == null || rawReport.isBlank()) {
+            return null;
+        }
+
+        String report = rawReport.trim().toUpperCase(Locale.ROOT);
+        ObjectNode weather = objectMapper.createObjectNode();
+        ObjectNode windNode = weather.putObject("wind");
+        ObjectNode mainNode = weather.putObject("main");
+        ObjectNode cloudsNode = weather.putObject("clouds");
+        ObjectNode sourceNode = weather.putObject("aviationSource");
+        sourceNode.put("type", reportType);
+        sourceNode.put("raw", rawReport.trim());
+
+        double windSpeed = safeNumber(fallbackWeather.path("wind").path("speed"), 0);
+        double windGust = safeNumber(fallbackWeather.path("wind").path("gust"), windSpeed);
+        double visibility = safeNumber(fallbackWeather.path("visibility"), 10000);
+        double pressure = safeNumber(fallbackWeather.path("main").path("pressure"), 1013);
+        double temp = safeNumber(fallbackWeather.path("main").path("temp"), 15);
+        double humidity = safeNumber(fallbackWeather.path("main").path("humidity"), 60);
+        double cloudiness = safeNumber(fallbackWeather.path("clouds").path("all"), 0);
+        int weatherCode = (int) safeNumber(fallbackWeather.path("weather").path(0).path("id"), 800);
+        String description = fallbackWeather.path("weather").path(0).path("description").asText("Ясно");
+        double rain = 0;
+        double snow = 0;
+
+        var windMatcher = AVIATION_WIND_PATTERN.matcher(report);
+        if (windMatcher.find()) {
+            double multiplier = "KT".equals(windMatcher.group("unit")) ? 0.514444 : 1.0;
+            windSpeed = Integer.parseInt(windMatcher.group("speed")) * multiplier;
+            String gust = windMatcher.group("gust");
+            windGust = gust == null ? windSpeed : Integer.parseInt(gust) * multiplier;
+            String direction = windMatcher.group("dir");
+            if (!"VRB".equals(direction)) {
+                windNode.put("deg", Integer.parseInt(direction));
+            }
+        }
+
+        if (report.contains("CAVOK")) {
+            visibility = 10000;
+            cloudiness = Math.min(cloudiness, 10);
+        } else {
+            var visibilityMatcher = AVIATION_VISIBILITY_PATTERN.matcher(report);
+            while (visibilityMatcher.find()) {
+                int value = Integer.parseInt(visibilityMatcher.group("visibility"));
+                if (value >= 50) {
+                    visibility = Math.min(value, 10000);
+                    break;
+                }
+            }
+        }
+
+        var pressureMatcher = AVIATION_PRESSURE_PATTERN.matcher(report);
+        if (pressureMatcher.find()) {
+            pressure = Integer.parseInt(pressureMatcher.group("pressure"));
+        }
+
+        var tempMatcher = AVIATION_TEMP_PATTERN.matcher(report);
+        if (tempMatcher.find()) {
+            temp = parseSignedAviationNumber(tempMatcher.group("temp"));
+        }
+
+        var cloudMatcher = AVIATION_CLOUD_PATTERN.matcher(report);
+        while (cloudMatcher.find()) {
+            cloudiness = Math.max(cloudiness, cloudinessPercent(cloudMatcher.group("cloud")));
+        }
+
+        if (containsAny(report, "TS", "VCTS", "TSRA", "CB")) {
+            weatherCode = 211;
+            description = "Гроза по " + reportType;
+            rain = Math.max(rain, report.contains("RA") ? 1.2 : 0);
+            cloudiness = Math.max(cloudiness, 90);
+        } else if (containsAny(report, "SN", "SHSN")) {
+            weatherCode = 601;
+            description = "Снег по " + reportType;
+            snow = Math.max(snow, 0.8);
+        } else if (containsAny(report, "RA", "SHRA", "DZ", "FZRA")) {
+            weatherCode = 501;
+            description = "Осадки по " + reportType;
+            rain = Math.max(rain, 0.8);
+        } else if (containsAny(report, "FG", "BR", "HZ")) {
+            weatherCode = 741;
+            description = "Туман/дымка по " + reportType;
+            visibility = Math.min(visibility, report.contains("FG") ? 1200 : 5000);
+        } else if (cloudiness >= 70) {
+            weatherCode = 803;
+            description = "Облачность по " + reportType;
+        }
+
+        windNode.put("speed", windSpeed);
+        windNode.put("gust", windGust);
+        mainNode.put("temp", temp);
+        mainNode.put("pressure", pressure);
+        mainNode.put("humidity", humidity);
+        cloudsNode.put("all", cloudiness);
+        weather.put("visibility", visibility);
+        if (rain > 0) {
+            weather.putObject("rain").put("1h", rain);
+        }
+        if (snow > 0) {
+            weather.putObject("snow").put("1h", snow);
+        }
+        weather.put("provider", "meteorologist-" + reportType.toLowerCase(Locale.ROOT));
+        var weatherArray = weather.putArray("weather");
+        var weatherItem = weatherArray.addObject();
+        weatherItem.put("id", weatherCode);
+        weatherItem.put("description", description);
+        return weather;
+    }
+
+    private FlightRiskDto withMeteorologistSurfaceFactors(
+            FlightRiskDto baseRisk,
+            Map<String, String> responseByNeed,
+            boolean landingPhase
+    ) {
+        double score = baseRisk.score() == null ? 0 : baseRisk.score();
+        List<String> factors = new ArrayList<>(baseRisk.factors() == null ? List.of() : baseRisk.factors());
+
+        if (landingPhase) {
+            String wind = blankToDefault(responseByNeed.get("landingWind"), "");
+            String gusts = blankToDefault(responseByNeed.get("landingGusts"), "");
+            String visibility = blankToDefault(responseByNeed.get("landingVisibility"), "");
+            Double windValue = windSpeedFromText(wind);
+            Double gustValue = windSpeedFromText(gusts);
+            Double visibilityValue = firstNumber(visibility);
+            if (windValue != null && windValue >= 10) {
+                score += windValue >= 16 ? 14 : 8;
+                factors.add("Метеоролог: ветер на посадке " + formatOneDecimal(windValue) + " м/с");
+            }
+            if (gustValue != null && gustValue >= 14) {
+                score += gustValue >= 22 ? 14 : 8;
+                factors.add("Метеоролог: порывы на посадке до " + formatOneDecimal(gustValue) + " м/с");
+            }
+            if (visibilityValue != null && visibilityValue < 5000) {
+                score += visibilityValue < 1500 ? 18 : 10;
+                factors.add("Метеоролог: видимость на посадке " + Math.round(visibilityValue) + " м");
+            }
+        }
+
+        String thunderstorm = blankToDefault(responseByNeed.get("thunderstorm"), "");
+        if (containsRiskText(thunderstorm, "гроз", "ts", "cb", "cumulonimbus")) {
+            score += 18;
+            factors.add("Метеоролог: указана грозовая обстановка");
+        }
+
+        String icing = blankToDefault(responseByNeed.get("icing"), "");
+        if (containsRiskText(icing, "облед", "icing", "ice", "лед")) {
+            score += 10;
+            factors.add("Метеоролог: указан риск обледенения");
+        }
+
+        return new FlightRiskDto(clampScore(score), factors);
+    }
+
+    private FlightRiskDto withMeteorologistCruiseFactors(
+            FlightRiskDto baseRisk,
+            Map<String, String> responseByNeed
+    ) {
+        double score = baseRisk.score() == null ? 0 : baseRisk.score();
+        List<String> factors = new ArrayList<>(baseRisk.factors() == null ? List.of() : baseRisk.factors());
+        String route = blankToDefault(responseByNeed.get("routeConditions"), "");
+        if (containsRiskText(route, "гроз", "ts", "cb", "турбул", "icing", "облед", "сдвиг", "wind shear")) {
+            score += 14;
+            factors.add("Метеоролог: опасные условия на маршруте");
+        }
+        if (containsRiskText(route, "сильн", "опас", "ухудш", "огранич")) {
+            score += 6;
+            factors.add("Метеоролог: ограничения по маршруту");
+        }
+        return new FlightRiskDto(clampScore(score), factors);
+    }
+
+    private FlightRiskDto withDepartureTimeFactors(
+            FlightRiskDto baseRisk,
+            LocalDateTime departureAt,
+            LocalDateTime now
+    ) {
+        if (departureAt == null || now == null) {
+            return baseRisk;
+        }
+
+        double score = baseRisk.score() == null ? 0 : baseRisk.score();
+        List<String> factors = new ArrayList<>(baseRisk.factors() == null ? List.of() : baseRisk.factors());
+        long hoursUntilDeparture = Duration.between(now, departureAt).toHours();
+        int hourOfDay = departureAt.getHour();
+
+        if (hoursUntilDeparture >= 0 && hoursUntilDeparture < 3) {
+            score += 10;
+            factors.add("Временной фактор: до вылета менее 3 часов");
+        } else if (hoursUntilDeparture >= 0 && hoursUntilDeparture < 12) {
+            score += 6;
+            factors.add("Временной фактор: до вылета менее 12 часов");
+        } else if (hoursUntilDeparture >= 24) {
+            score += 2;
+            factors.add("Временной фактор: дальний прогноз");
+        }
+
+        if (hourOfDay < 6 || hourOfDay >= 22) {
+            score += 3;
+            factors.add("Временной фактор: ночное время вылета");
+        }
+
+        return new FlightRiskDto(clampScore(score), factors);
+    }
+
+    private void validateMeteorologistResponseFormat(Map<String, String> responseByNeed) {
+        List<String> errors = new ArrayList<>();
+
+        String metar = normalizeAviationReport(responseByNeed.get("metar"));
+        if (!metar.isBlank()
+                && (!AVIATION_ICAO_PATTERN.matcher(metar).find()
+                || !AVIATION_TIME_PATTERN.matcher(metar).find()
+                || !AVIATION_WIND_PATTERN.matcher(metar).find()
+                || !(metar.contains("CAVOK") || AVIATION_VISIBILITY_PATTERN.matcher(metar).find())
+                || !AVIATION_CLOUD_PATTERN.matcher(metar).find()
+                || !AVIATION_TEMP_PATTERN.matcher(metar).find()
+                || !AVIATION_PRESSURE_PATTERN.matcher(metar).find())) {
+            errors.add("METAR должен быть в формате: UUEE 251200Z 22008MPS 9999 SCT020 06/M01 Q1018");
+        }
+
+        String taf = normalizeAviationReport(responseByNeed.get("taf"));
+        if (!taf.isBlank()
+                && (!AVIATION_ICAO_PATTERN.matcher(taf).find()
+                || !AVIATION_TIME_PATTERN.matcher(taf).find()
+                || !TAF_PERIOD_PATTERN.matcher(taf).find()
+                || !AVIATION_WIND_PATTERN.matcher(taf).find()
+                || !(taf.contains("CAVOK") || AVIATION_VISIBILITY_PATTERN.matcher(taf).find())
+                || !AVIATION_CLOUD_PATTERN.matcher(taf).find())) {
+            errors.add("TAF должен быть в формате: TAF UUEE 251100Z 2512/2612 21007MPS 9999 BKN020");
+        }
+
+        validateTextField(responseByNeed, "thunderstorm", "(?iu).*(нет|отсутств|гроза|грозов|tsra|vcts|\\bts\\b|\\bcb\\b|cumulonimbus|ливн|молни).*", "Грозовая обстановка должна содержать авиационное описание или 'нет гроз'", errors);
+        validateTextField(responseByNeed, "icing", "(?iu).*(нет|отсутств|облед|icing|ice|измороз|слаб|умерен|сильн|эшелон|fl\\d{2,3}).*", "Обледенение должно содержать авиационное описание или 'нет обледенения'", errors);
+        validateNoFullReportField(responseByNeed, "landingWind", "В поле ветра на посадке нужен только ветер, например 220 8 м/с, а не полный METAR", errors);
+        validatePatternField(responseByNeed, "landingWind", LANDING_WIND_TEXT_PATTERN, "Ветер на посадке укажите как 240 10 м/с, 240 градусов 10 м/с или 24010MPS", errors);
+        validatePatternField(responseByNeed, "landingGusts", LANDING_GUST_TEXT_PATTERN, "Порывы укажите как '16 м/с', 'порывы до 16 м/с' или G22KT", errors);
+        validateNoFullReportField(responseByNeed, "landingVisibility", "В поле видимости нужна только видимость, например 9999 м или 3200-5000 м, а не полный METAR", errors);
+        validateLandingVisibility(responseByNeed.get("landingVisibility"), errors);
+        validateTextField(responseByNeed, "routeConditions", "(?iu).*(нет|спокойн|без\\s+опас|гроза|турбулентн|turbulence|turb|облед|icing|сдвиг|wind shear|осад|туман|видим|ветер|фронт|cb|ts).*", "Условия на маршруте должны содержать авиационное описание, например 'риск турбулентности', или 'без опасных явлений'", errors);
+
+        if (!errors.isEmpty()) {
+            throw new IllegalArgumentException(String.join("; ", errors));
+        }
+    }
+
+    private void validateTextField(Map<String, String> responseByNeed, String key, String regex, String error, List<String> errors) {
+        String value = blankToDefault(responseByNeed.get(key), "");
+        if (!value.isBlank() && !Pattern.compile(regex).matcher(value).matches()) {
+            errors.add(error);
+        }
+    }
+
+    private void validatePatternField(Map<String, String> responseByNeed, String key, Pattern pattern, String error, List<String> errors) {
+        String value = blankToDefault(responseByNeed.get(key), "");
+        if (!value.isBlank() && !pattern.matcher(value).find()) {
+            errors.add(error);
+        }
+    }
+
+    private void validateNoFullReportField(Map<String, String> responseByNeed, String key, String error, List<String> errors) {
+        String value = normalizeAviationReport(responseByNeed.get(key));
+        if (!value.isBlank()
+                && AVIATION_ICAO_PATTERN.matcher(value).find()
+                && AVIATION_TIME_PATTERN.matcher(value).find()) {
+            errors.add(error);
+        }
+    }
+
+    private void validateLandingVisibility(String rawVisibility, List<String> errors) {
+        String value = blankToDefault(rawVisibility, "");
+        if (value.isBlank()) {
+            return;
+        }
+        var matcher = LANDING_VISIBILITY_TEXT_PATTERN.matcher(value);
+        while (matcher.find()) {
+            int visibility = Integer.parseInt(matcher.group());
+            if (visibility >= 100 && visibility <= 10000) {
+                return;
+            }
+        }
+        errors.add("Видимость на посадке укажите в метрах от 100 до 10000");
+    }
+
+    private String normalizeAviationReport(String value) {
+        return blankToDefault(value, "").toUpperCase(Locale.ROOT).replaceAll("\\s+", " ").trim();
     }
 
     private void applyAutomaticDecision(FlightEntity flight, Instant now) {
@@ -555,6 +1116,14 @@ public class FlightService {
         return Math.max(0, Math.min(100, (int) Math.round(value)));
     }
 
+    private int calculateTotalRisk(FlightRiskDto departureRisk, FlightRiskDto arrivalRisk, FlightRiskDto cruiseRisk) {
+        return clampScore(
+                departureRisk.score() * 0.4
+                        + arrivalRisk.score() * 0.4
+                        + cruiseRisk.score() * 0.2
+        );
+    }
+
     private FeasibilityDto getFeasibility(int totalRisk) {
         if (totalRisk <= 30) {
             return new FeasibilityDto("Высокая реализуемость", "risk-low");
@@ -573,6 +1142,87 @@ public class FlightService {
             return fallback;
         }
         return value.isNumber() ? value.asDouble() : fallback;
+    }
+
+    private int parseSignedAviationNumber(String value) {
+        if (value == null || value.isBlank()) {
+            return 0;
+        }
+        String normalized = value.trim().toUpperCase(Locale.ROOT);
+        if (normalized.startsWith("M")) {
+            return -Integer.parseInt(normalized.substring(1));
+        }
+        return Integer.parseInt(normalized);
+    }
+
+    private int cloudinessPercent(String cloudCode) {
+        if (cloudCode == null) {
+            return 0;
+        }
+        return switch (cloudCode) {
+            case "FEW" -> 20;
+            case "SCT" -> 45;
+            case "BKN" -> 75;
+            case "OVC", "VV" -> 95;
+            default -> 0;
+        };
+    }
+
+    private boolean containsAny(String source, String... needles) {
+        if (source == null || source.isBlank()) {
+            return false;
+        }
+        String normalized = source.toUpperCase(Locale.ROOT);
+        for (String needle : needles) {
+            if (normalized.contains(needle.toUpperCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean containsRiskText(String source, String... needles) {
+        if (source == null || source.isBlank()) {
+            return false;
+        }
+        String normalized = source.toLowerCase(Locale.ROOT);
+        for (String needle : needles) {
+            if (normalized.contains(needle.toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Double firstNumber(String source) {
+        if (source == null || source.isBlank()) {
+            return null;
+        }
+        var matcher = Pattern.compile("[-+]?\\d+(?:[.,]\\d+)?").matcher(source);
+        if (!matcher.find()) {
+            return null;
+        }
+        return Double.parseDouble(matcher.group().replace(',', '.'));
+    }
+
+    private Double windSpeedFromText(String source) {
+        if (source == null || source.isBlank()) {
+            return null;
+        }
+        var matcher = WIND_SPEED_TEXT_PATTERN.matcher(source);
+        Double value = null;
+        String unit = "";
+        while (matcher.find()) {
+            value = Double.parseDouble(matcher.group("speed").replace(',', '.'));
+            unit = matcher.group("unit").toLowerCase(Locale.ROOT);
+        }
+        if (value == null) {
+            return firstNumber(source);
+        }
+        if (unit.startsWith("kt") || unit.startsWith("уз")) {
+            return value * 0.514444;
+        }
+        return value;
     }
 
     private String formatOneDecimal(double value) {
@@ -746,6 +1396,69 @@ public class FlightService {
         );
     }
 
+    private MeteorologistRequestDto toMeteorologistRequestDto(FlightEntity entity) {
+        LocalDateTime arrivalAt = entity.getArrivalAt() != null
+                ? entity.getArrivalAt()
+                : estimateArrivalAt(
+                entity.getDepartureAt(),
+                entity.getFromAirportId(),
+                entity.getToAirportId(),
+                resolveAircraftType(entity.getAircraftType())
+        );
+
+        return new MeteorologistRequestDto(
+                entity.getMeteorologistRequestId(),
+                entity.getMeteorologistRequestCreatedAt(),
+                blankToDefault(entity.getMeteorologistRequestStatus(), "new"),
+                blankToDefault(entity.getMeteorologistDispatcherName(), "Диспетчер рейсов"),
+                new MeteorologistRequestFormDto(
+                        entity.getFlightNumber(),
+                        entity.getFromAirportId(),
+                        entity.getToAirportId(),
+                        entity.getDepartureAt(),
+                        arrivalAt,
+                        blankToDefault(entity.getMeteorologistDispatcherComment(), "")
+                ),
+                fromBooleanMapJson(entity.getMeteorologistRequestNeeds()),
+                blankToDefault(entity.getMeteorologistRequestText(), ""),
+                true,
+                fromStringMapJson(entity.getMeteorologistResponseByNeed()),
+                blankToDefault(entity.getMeteorologistMessage(), ""),
+                entity.getMeteorologistResponseComplete(),
+                entity.getMeteorologistEmptyFieldsCount(),
+                entity.getMeteorologistAnsweredAt()
+        );
+    }
+
+    private void archiveCurrentMeteorologistRequest(FlightEntity flight) {
+        if (flight.getMeteorologistRequestId() == null || flight.getMeteorologistRequestId().isBlank()) {
+            return;
+        }
+
+        MeteorologistRequestDto snapshot = toMeteorologistRequestDto(flight);
+        List<MeteorologistRequestDto> history = new ArrayList<>(fromMeteorologistRequestHistory(flight.getMeteorologistRequestHistory()));
+        history.removeIf((item) -> Objects.equals(item.id(), snapshot.id()));
+        history.add(0, snapshot);
+        if (history.size() > 30) {
+            history = history.subList(0, 30);
+        }
+        flight.setMeteorologistRequestHistory(toJsonValue(history));
+    }
+
+    private List<MeteorologistRequestDto> fromMeteorologistRequestHistory(String json) {
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        try {
+            List<MeteorologistRequestDto> parsed = objectMapper.readValue(json, METEOROLOGIST_REQUEST_LIST);
+            return parsed == null ? List.of() : parsed.stream()
+                    .filter(Objects::nonNull)
+                    .toList();
+        } catch (Exception exception) {
+            return List.of();
+        }
+    }
+
     private void saveFlightHistoryEvent(
             FlightEntity flight,
             Integer oldTotalRisk,
@@ -797,6 +1510,22 @@ public class FlightService {
         }
     }
 
+    private String toJsonValue(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (Exception exception) {
+            throw new IllegalStateException("Cannot serialize value", exception);
+        }
+    }
+
+    private String toJsonMap(Map<?, ?> value) {
+        try {
+            return objectMapper.writeValueAsString(value == null ? Map.of() : value);
+        } catch (Exception exception) {
+            throw new IllegalStateException("Cannot serialize meteorologist data", exception);
+        }
+    }
+
     private List<String> fromJson(String value) {
         try {
             if (value == null || value.isBlank()) {
@@ -806,6 +1535,69 @@ public class FlightService {
         } catch (Exception exception) {
             return List.of();
         }
+    }
+
+    private Map<String, Boolean> fromBooleanMapJson(String value) {
+        try {
+            if (value == null || value.isBlank()) {
+                return Map.of();
+            }
+            return objectMapper.readValue(value, BOOLEAN_MAP);
+        } catch (Exception exception) {
+            return Map.of();
+        }
+    }
+
+    private Map<String, String> fromStringMapJson(String value) {
+        try {
+            if (value == null || value.isBlank()) {
+                return Map.of();
+            }
+            return objectMapper.readValue(value, STRING_MAP);
+        } catch (Exception exception) {
+            return Map.of();
+        }
+    }
+
+    private Map<String, Boolean> defaultMeteorologistNeeds() {
+        Map<String, Boolean> needs = new LinkedHashMap<>();
+        needs.put("departureWeather", true);
+        needs.put("arrivalWeather", true);
+        needs.put("routeWeather", true);
+        needs.put("visibility", true);
+        needs.put("wind", true);
+        needs.put("recommendation", true);
+        return needs;
+    }
+
+    private String resolveMeteorologistRequestId(FlightEntity flight, CreateMeteorologistRequest request) {
+        if (request.id() != null && !request.id().isBlank()) {
+            return request.id().trim();
+        }
+        return "req-" + Instant.now().toEpochMilli() + "-" + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    private String buildMeteorologistRequestText(CreateMeteorologistRequest request, Map<String, Boolean> needs) {
+        return String.join("\n",
+                "Номер рейса: " + blankToDefault(request.flightNumber(), "не указан"),
+                "Аэропорт вылета: " + blankToDefault(request.fromAirportId(), "не указан"),
+                "Аэропорт назначения: " + blankToDefault(request.toAirportId(), "не указан"),
+                "Плановое время вылета (ETD): " + (request.etd() == null ? "не указано" : request.etd()),
+                "Плановое время прилета (ETA): " + (request.eta() == null ? "не указано" : request.eta()),
+                "Требуются метеоданные: " + String.join(", ", needs.entrySet().stream()
+                        .filter(Map.Entry::getValue)
+                        .map(Map.Entry::getKey)
+                        .toList()),
+                "Комментарий диспетчера: " + blankToDefault(request.dispatcherComment(), "")
+        );
+    }
+
+    private String blankToDefault(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback : value.trim();
+    }
+
+    private String normalizeAirportId(String airportId) {
+        return airportId == null ? "" : airportId.trim().toUpperCase(Locale.ROOT);
     }
 
     private LocalDateTime resolveArrivalAt(CreateFlightRequest request) {

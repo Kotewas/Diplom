@@ -19,7 +19,11 @@ import {
   METEOROLOGIST_NEEDS,
 } from '../model/meteorologistNeeds'
 import { validateDispatcherRequest } from '../model/meteorologistValidation'
-import { saveActiveMeteorologistRequest } from '../services/meteorologistRequestsStorage'
+import {
+  fetchMeteorologistChatLog,
+  markLatestMeteorologistResponseSeenForDispatcher,
+  saveActiveMeteorologistRequestToBackend,
+} from '../services/meteorologistRequestsStorage'
 import './MeteorologistRequestPage.css'
 
 function createInitialForm(initialValues) {
@@ -61,6 +65,7 @@ export default function MeteorologistRequestPage({ initialValues, onBack, onSent
   const [form, setForm] = useState(() => createInitialForm(initialValues))
   const [needs, setNeeds] = useState(DEFAULT_METEOROLOGIST_NEEDS)
   const [sendStatus, setSendStatus] = useState('')
+  const [isSending, setIsSending] = useState(false)
   const [validationError, setValidationError] = useState(null)
 
   const requestMessage = useMemo(() => buildRequestMessage(form, needs), [form, needs])
@@ -70,8 +75,9 @@ export default function MeteorologistRequestPage({ initialValues, onBack, onSent
     setNeeds((prev) => ({ ...prev, [key]: !prev[key] }))
   }
 
-  const handleSendRequest = () => {
+  const handleSendRequest = async () => {
     setValidationError(null)
+    setSendStatus('')
 
     if (!validation.isValid) {
       setValidationError({
@@ -93,7 +99,20 @@ export default function MeteorologistRequestPage({ initialValues, onBack, onSent
       dataComplete: validation.isValid,
     }
 
-    saveActiveMeteorologistRequest(requestPayload)
+    setIsSending(true)
+    try {
+      const currentLog = await fetchMeteorologistChatLog()
+      markLatestMeteorologistResponseSeenForDispatcher(currentLog)
+      await saveActiveMeteorologistRequestToBackend(requestPayload)
+    } catch (cause) {
+      setValidationError({
+        title: 'Запрос не отправлен',
+        message: cause?.message || 'Не удалось сохранить запрос в базе данных.',
+        details: 'Проверьте, что backend и PostgreSQL запущены. Запрос должен сохраняться в БД, чтобы его увидел другой браузер.',
+      })
+      setIsSending(false)
+      return
+    }
 
     const now = new Date().toLocaleTimeString('ru-RU', {
       hour: '2-digit',
@@ -101,7 +120,13 @@ export default function MeteorologistRequestPage({ initialValues, onBack, onSent
     })
 
     setSendStatus(`Запрос отправлен метеорологу в ${now}.`)
-    onSent?.()
+    setIsSending(false)
+    onSent?.({
+      flightNumber: form.flightNumber,
+      fromAirportId: form.fromAirportId,
+      toAirportId: form.toAirportId,
+      sentAt: new Date().toISOString(),
+    })
   }
 
   return (
@@ -207,6 +232,7 @@ export default function MeteorologistRequestPage({ initialValues, onBack, onSent
               radius="xl"
               onClick={handleSendRequest}
               leftSection={<IconCheck size={16} />}
+              loading={isSending}
             >
               Отправить запрос
             </Button>

@@ -26,16 +26,12 @@ public class ApiExceptionHandler {
     @ExceptionHandler(IllegalStateException.class)
     public ResponseEntity<ApiErrorResponse> handleState(IllegalStateException exception) {
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(new ApiErrorResponse(exception.getMessage(), Instant.now()));
+                .body(new ApiErrorResponse("Сервер временно не может выполнить операцию", Instant.now()));
     }
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiErrorResponse> handleUnexpected(Exception exception) {
-        String message = exception.getMessage();
-        if (message == null || message.isBlank()) {
-            message = "Unexpected server error";
-        }
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(new ApiErrorResponse(message, Instant.now()));
+                .body(new ApiErrorResponse("Unexpected server error", Instant.now()));
     }
 }

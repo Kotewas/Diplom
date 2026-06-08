@@ -27,7 +27,7 @@ export const METEOROLOGIST_NEEDS = [
     key: 'landingWind',
     label: 'Условия посадки: ветер',
     responseLabel: 'Ветер на посадке',
-    placeholder: 'Например: 240° 10 м/с, боковая составляющая умеренная.',
+    placeholder: 'Например: 240 10 м/с, боковая составляющая умеренная.',
   },
   {
     key: 'landingGusts',

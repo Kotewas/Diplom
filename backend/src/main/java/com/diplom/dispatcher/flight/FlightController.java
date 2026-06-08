@@ -39,6 +39,11 @@ public class FlightController {
         return flightService.refreshRiskNow(flightId);
     }
 
+    @PostMapping("/refresh-risks")
+    public List<FlightDto> refreshAllRisks() {
+        return flightService.refreshAllRisksNow();
+    }
+
     @PostMapping("/{flightId}/decision")
     public FlightDto applyDecision(@PathVariable String flightId, @Valid @RequestBody ApplyDecisionRequest request) {
         return flightService.applyDispatcherDecision(flightId, request);

@@ -11,5 +11,9 @@ public interface FlightRepository extends JpaRepository<FlightEntity, String> {
 
     List<FlightEntity> findAllByFlightNumber(String flightNumber);
 
+    List<FlightEntity> findAllByMeteorologistRequestIdIsNotNullOrderByMeteorologistRequestCreatedAtDesc();
+
+    List<FlightEntity> findAllByMeteorologistRequestId(String meteorologistRequestId);
+
     boolean existsByFlightNumberAndDepartureAt(String flightNumber, LocalDateTime departureAt);
 }

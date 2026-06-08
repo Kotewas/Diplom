@@ -18,11 +18,11 @@ import { IconAlertCircle, IconChevronLeft, IconSend2 } from '@tabler/icons-react
 import { METEOROLOGIST_NEEDS } from '../model/meteorologistNeeds'
 import { validateMeteorologistResponse } from '../model/meteorologistValidation'
 import {
-  markIncomingNotificationRead,
-  readActiveMeteorologistRequest,
+  fetchMeteorologistChatLog,
   readMeteorologistChatLog,
-  updateActiveMeteorologistResponse,
+  updateActiveMeteorologistResponseToBackend,
 } from '../services/meteorologistRequestsStorage'
+import { addAppUpdateListener } from '../services/appUpdatesSocket'
 import './MeteorologistPage.css'
 
 function formatDateTime(value) {
@@ -46,11 +46,6 @@ function createResponseDraft(request) {
 function resolveRequestForNotification(notification, notifications) {
   if (!notification) return null
 
-  const liveRequest = readActiveMeteorologistRequest()
-  if (liveRequest && liveRequest.id === notification.requestId) {
-    return liveRequest
-  }
-
   const answeredNotification = (notifications ?? []).find(
     (item) =>
       item.requestId === notification.requestId &&
@@ -73,6 +68,7 @@ export default function MeteorologistPage({ onBack, backLabel = 'К таблиц
   const [submitStatus, setSubmitStatus] = useState('')
   const [submitStatusColor, setSubmitStatusColor] = useState('teal')
   const [notificationTab, setNotificationTab] = useState('unread')
+  const [isLoadingNotifications, setIsLoadingNotifications] = useState(false)
 
   const requestedNeeds = useMemo(
     () => METEOROLOGIST_NEEDS.filter((item) => selectedRequest?.needs?.[item.key]),
@@ -98,21 +94,42 @@ export default function MeteorologistPage({ onBack, backLabel = 'К таблиц
   )
 
   useEffect(() => {
-    const refresh = () => setChatLog(readMeteorologistChatLog())
-    const intervalId = setInterval(refresh, 3000)
-    window.addEventListener('storage', refresh)
+    let cancelled = false
+    const refresh = async () => {
+      setIsLoadingNotifications(true)
+      try {
+        const nextLog = await fetchMeteorologistChatLog()
+        if (!cancelled) {
+          setChatLog(nextLog)
+        }
+      } catch (cause) {
+        if (!cancelled) {
+          setSubmitStatusColor('orange')
+          setSubmitStatus(cause?.message || 'Не удалось загрузить запросы из базы данных.')
+        }
+      } finally {
+        if (!cancelled) setIsLoadingNotifications(false)
+      }
+    }
+
+    refresh()
+    const removeListener = addAppUpdateListener((event) => {
+      if (
+        event?.type === 'CONNECTED' ||
+        event?.type === 'METEOROLOGIST_REQUEST_CREATED' ||
+        event?.type === 'METEOROLOGIST_RESPONSE_SUBMITTED'
+      ) {
+        refresh()
+      }
+    })
     return () => {
-      clearInterval(intervalId)
-      window.removeEventListener('storage', refresh)
+      cancelled = true
+      removeListener()
     }
   }, [])
 
   const openNotification = (notification) => {
-    const nextLog =
-      notification?.direction === 'incoming'
-        ? markIncomingNotificationRead(notification.requestId)
-        : readMeteorologistChatLog()
-
+    const nextLog = chatLog
     setChatLog(nextLog)
     setActiveNotificationId(notification.id)
     const updatedNotification = nextLog.find((item) => item.id === notification.id) ?? notification
@@ -129,9 +146,12 @@ export default function MeteorologistPage({ onBack, backLabel = 'К таблиц
       ...prev,
       [needKey]: nextValue,
     }))
+    if (submitStatusColor === 'orange') {
+      setSubmitStatus('')
+    }
   }
 
-  const handleSubmitResponse = () => {
+  const handleSubmitResponse = async () => {
     if (!selectedRequest) return
 
     const hasAnyResponse = Object.values(responseByNeed).some(
@@ -143,32 +163,35 @@ export default function MeteorologistPage({ onBack, backLabel = 'К таблиц
       setSubmitStatus('Заполните хотя бы один параметр или сообщение диспетчеру.')
       return
     }
-
-    const updatedRequest = updateActiveMeteorologistResponse(responseByNeed, meteorologistMessage)
-    if (!updatedRequest) {
+    if (!responseValidation.isValid) {
       setSubmitStatusColor('orange')
-      setSubmitStatus('Этот запрос уже закрыт или не активен.')
+      setSubmitStatus('Заполните обязательные поля и исправьте формат метеоданных перед отправкой.')
       return
     }
 
-    const nextLog = readMeteorologistChatLog()
-    const sentNotification = nextLog.find(
-      (item) =>
-        item.direction === 'outgoing' &&
-        item.messageType === 'meteorologist_response' &&
-        item.requestId === updatedRequest.id,
-    )
+    let updatedRequest
+    try {
+      updatedRequest = await updateActiveMeteorologistResponseToBackend(
+        selectedRequest.id,
+        responseByNeed,
+        meteorologistMessage,
+      )
+    } catch (cause) {
+      setSubmitStatusColor('orange')
+      setSubmitStatus(cause?.message || 'Не удалось сохранить ответ в базе данных.')
+      return
+    }
+
+    const nextLog = await fetchMeteorologistChatLog()
 
     setChatLog(nextLog)
     setNotificationTab('sent')
-    setSelectedRequest(updatedRequest)
-    setActiveNotificationId(sentNotification?.id ?? '')
-    setResponseByNeed(createResponseDraft(updatedRequest))
-    setMeteorologistMessage(updatedRequest.meteorologistMessage ?? '')
+    setSelectedRequest(null)
+    setActiveNotificationId('')
+    setResponseByNeed({})
+    setMeteorologistMessage('')
     setSubmitStatusColor('teal')
-    setSubmitStatus(
-      `Ответ отправлен диспетчеру ${updatedRequest.dispatcherName || 'Диспетчер'} в ${formatDateTime(updatedRequest.answeredAt)}.`,
-    )
+    setSubmitStatus(`Сообщение отправлено диспетчеру в ${formatDateTime(updatedRequest.answeredAt)}.`)
   }
 
   const isRequestAnswered = selectedRequest?.status === 'answered'
@@ -262,6 +285,7 @@ export default function MeteorologistPage({ onBack, backLabel = 'К таблиц
                               autosize
                               value={responseByNeed[need.key] ?? ''}
                               description={need.placeholder}
+                              error={responseValidation.fieldErrors?.[need.key]}
                               readOnly={isRequestAnswered}
                               onChange={(event) => updateNeedValue(need.key, event.target.value)}
                             />
@@ -280,7 +304,12 @@ export default function MeteorologistPage({ onBack, backLabel = 'К таблиц
                         value={meteorologistMessage}
                         description="Кратко укажите важные замечания, ограничения или рекомендацию для диспетчера."
                         readOnly={isRequestAnswered}
-                        onChange={(event) => setMeteorologistMessage(event.target.value)}
+                        onChange={(event) => {
+                          setMeteorologistMessage(event.target.value)
+                          if (submitStatusColor === 'orange') {
+                            setSubmitStatus('')
+                          }
+                        }}
                       />
                     </Stack>
                   </Paper>
@@ -294,9 +323,7 @@ export default function MeteorologistPage({ onBack, backLabel = 'К таблиц
                           onClick={handleSubmitResponse}
                           color={responseValidation.isValid ? 'blue' : 'orange'}
                         >
-                          {responseValidation.isValid
-                            ? 'Отправить метеоданные диспетчеру'
-                            : 'Отправить неполные метеоданные диспетчеру'}
+                          Отправить метеоданные диспетчеру
                         </Button>
                         {submitStatus && (
                           <Alert color={submitStatusColor} radius="md" variant="light">
@@ -310,14 +337,14 @@ export default function MeteorologistPage({ onBack, backLabel = 'К таблиц
                           radius="md"
                           variant="light"
                           icon={<IconAlertCircle size={18} />}
-                          title="Неполные метеоданные"
+                          title="Неполные или неверные метеоданные"
                         >
                           <Stack gap={4}>
                             <Text size="sm">
-                              Не заполнены: {responseValidation.missingFields.join(', ')}
+                              Исправьте: {responseValidation.missingFields.join(', ')}
                             </Text>
                             <Text size="xs" c="dimmed">
-                              При отправке неполных данных риск диспетчером будет рассчитан с повышенным коэффициентом.
+                              METAR/TAF, ветер, порывы, видимость и текстовые параметры должны быть в авиационном формате.
                             </Text>
                           </Stack>
                         </Alert>
@@ -336,7 +363,7 @@ export default function MeteorologistPage({ onBack, backLabel = 'К таблиц
               <Title order={3}>Уведомления</Title>
 
               {chatLog.length === 0 ? (
-                <Text c="dimmed">Пока уведомлений нет.</Text>
+                <Text c="dimmed">{isLoadingNotifications ? 'Загрузка уведомлений...' : 'Пока уведомлений нет.'}</Text>
               ) : (
                 <Stack gap="md">
                   <SegmentedControl

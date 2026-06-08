@@ -64,6 +64,19 @@ export async function refreshFlightRisk(flightId) {
   return response.json()
 }
 
+export async function refreshAllFlightRisks() {
+  const response = await fetchWithTimeout(`${API_BASE_URL}/api/flights/refresh-risks`, {
+    method: 'POST',
+  })
+
+  if (!response.ok) {
+    const message = await extractErrorMessage(response, `Refresh all risks HTTP ${response.status}`)
+    throw new Error(message)
+  }
+
+  return response.json()
+}
+
 export async function fetchFlightHistory(flightId) {
   const response = await fetchWithTimeout(`${API_BASE_URL}/api/flights/${flightId}/history`)
   if (!response.ok) {

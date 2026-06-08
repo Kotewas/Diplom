@@ -82,6 +82,45 @@ public class FlightEntity {
     @Column
     private Integer dispatcherDecisionDelayMinutes;
 
+    @Column
+    private String meteorologistRequestId;
+
+    @Column
+    private String meteorologistRequestStatus;
+
+    @Column
+    private Instant meteorologistRequestCreatedAt;
+
+    @Column(columnDefinition = "TEXT")
+    private String meteorologistRequestText;
+
+    @Column(columnDefinition = "TEXT")
+    private String meteorologistRequestNeeds;
+
+    @Column
+    private String meteorologistDispatcherName;
+
+    @Column(columnDefinition = "TEXT")
+    private String meteorologistDispatcherComment;
+
+    @Column(columnDefinition = "TEXT")
+    private String meteorologistResponseByNeed;
+
+    @Column(columnDefinition = "TEXT")
+    private String meteorologistMessage;
+
+    @Column
+    private Boolean meteorologistResponseComplete;
+
+    @Column
+    private Integer meteorologistEmptyFieldsCount;
+
+    @Column
+    private Instant meteorologistAnsweredAt;
+
+    @Column(columnDefinition = "TEXT")
+    private String meteorologistRequestHistory;
+
     public String getId() {
         return id;
     }
@@ -256,5 +295,109 @@ public class FlightEntity {
 
     public void setDispatcherDecisionDelayMinutes(Integer dispatcherDecisionDelayMinutes) {
         this.dispatcherDecisionDelayMinutes = dispatcherDecisionDelayMinutes;
+    }
+
+    public String getMeteorologistRequestId() {
+        return meteorologistRequestId;
+    }
+
+    public void setMeteorologistRequestId(String meteorologistRequestId) {
+        this.meteorologistRequestId = meteorologistRequestId;
+    }
+
+    public String getMeteorologistRequestStatus() {
+        return meteorologistRequestStatus;
+    }
+
+    public void setMeteorologistRequestStatus(String meteorologistRequestStatus) {
+        this.meteorologistRequestStatus = meteorologistRequestStatus;
+    }
+
+    public Instant getMeteorologistRequestCreatedAt() {
+        return meteorologistRequestCreatedAt;
+    }
+
+    public void setMeteorologistRequestCreatedAt(Instant meteorologistRequestCreatedAt) {
+        this.meteorologistRequestCreatedAt = meteorologistRequestCreatedAt;
+    }
+
+    public String getMeteorologistRequestText() {
+        return meteorologistRequestText;
+    }
+
+    public void setMeteorologistRequestText(String meteorologistRequestText) {
+        this.meteorologistRequestText = meteorologistRequestText;
+    }
+
+    public String getMeteorologistRequestNeeds() {
+        return meteorologistRequestNeeds;
+    }
+
+    public void setMeteorologistRequestNeeds(String meteorologistRequestNeeds) {
+        this.meteorologistRequestNeeds = meteorologistRequestNeeds;
+    }
+
+    public String getMeteorologistDispatcherName() {
+        return meteorologistDispatcherName;
+    }
+
+    public void setMeteorologistDispatcherName(String meteorologistDispatcherName) {
+        this.meteorologistDispatcherName = meteorologistDispatcherName;
+    }
+
+    public String getMeteorologistDispatcherComment() {
+        return meteorologistDispatcherComment;
+    }
+
+    public void setMeteorologistDispatcherComment(String meteorologistDispatcherComment) {
+        this.meteorologistDispatcherComment = meteorologistDispatcherComment;
+    }
+
+    public String getMeteorologistResponseByNeed() {
+        return meteorologistResponseByNeed;
+    }
+
+    public void setMeteorologistResponseByNeed(String meteorologistResponseByNeed) {
+        this.meteorologistResponseByNeed = meteorologistResponseByNeed;
+    }
+
+    public String getMeteorologistMessage() {
+        return meteorologistMessage;
+    }
+
+    public void setMeteorologistMessage(String meteorologistMessage) {
+        this.meteorologistMessage = meteorologistMessage;
+    }
+
+    public Boolean getMeteorologistResponseComplete() {
+        return meteorologistResponseComplete;
+    }
+
+    public void setMeteorologistResponseComplete(Boolean meteorologistResponseComplete) {
+        this.meteorologistResponseComplete = meteorologistResponseComplete;
+    }
+
+    public Integer getMeteorologistEmptyFieldsCount() {
+        return meteorologistEmptyFieldsCount;
+    }
+
+    public void setMeteorologistEmptyFieldsCount(Integer meteorologistEmptyFieldsCount) {
+        this.meteorologistEmptyFieldsCount = meteorologistEmptyFieldsCount;
+    }
+
+    public Instant getMeteorologistAnsweredAt() {
+        return meteorologistAnsweredAt;
+    }
+
+    public void setMeteorologistAnsweredAt(Instant meteorologistAnsweredAt) {
+        this.meteorologistAnsweredAt = meteorologistAnsweredAt;
+    }
+
+    public String getMeteorologistRequestHistory() {
+        return meteorologistRequestHistory;
+    }
+
+    public void setMeteorologistRequestHistory(String meteorologistRequestHistory) {
+        this.meteorologistRequestHistory = meteorologistRequestHistory;
     }
 }
