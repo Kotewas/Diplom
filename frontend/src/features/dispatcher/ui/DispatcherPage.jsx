@@ -222,19 +222,13 @@ function getRiskBadgeColor(score) {
 
 function formatRiskBadgeScore(score) {
   if (!Number.isFinite(Number(score))) return '–'
-  const normalized = Math.max(5, Math.round(Number(score)))
+  const normalized = Math.round(Number(score))
   return `${normalized}/100`
 }
 
 function asNumberOrNull(value) {
   const numeric = Number(value)
   return Number.isFinite(numeric) ? numeric : null
-}
-
-function withDisplayRiskFloor(score) {
-  const numeric = asNumberOrNull(score)
-  if (numeric == null) return null
-  return Math.max(5, Math.round(numeric))
 }
 
 function getDisplayProgressValue(score) {
@@ -2771,7 +2765,7 @@ export default function DispatcherPage({
     updateFlightInState,
   ])
 
-  const printFlightReport = useCallback((flight) => {
+  const printFlightReport = useCallback(async (flight) => {
     if (!flight?.id) return
 
     const fromAirport = allAirportsById[flight.fromAirportId]
@@ -2781,6 +2775,24 @@ export default function DispatcherPage({
     const depFactors = Array.isArray(flight?.departureRisk?.factors) ? flight.departureRisk.factors : []
     const arrFactors = Array.isArray(flight?.arrivalRisk?.factors) ? flight.arrivalRisk.factors : []
     const cruiseFactors = Array.isArray(flight?.cruiseRisk?.factors) ? flight.cruiseRisk.factors : []
+    let historyItems = []
+    try {
+      const history = await fetchFlightHistory(flight.id)
+      historyItems = Array.isArray(history) ? history : []
+    } catch {
+      historyItems = []
+    }
+    const historyRows = historyItems.length
+      ? historyItems.map((item) => `
+        <tr>
+          <td>${escapeHtml(formatDateTime(item.changedAt))}</td>
+          <td>${escapeHtml(getRiskChangeReason(item))}</td>
+          <td>${escapeHtml(item.oldTotalRisk == null ? 'нет' : `${item.oldTotalRisk}/100`)}</td>
+          <td>${escapeHtml(item.newTotalRisk == null ? 'нет' : `${item.newTotalRisk}/100`)}</td>
+          <td>${escapeHtml(decisionLabel(item.dispatcherDecision))}</td>
+        </tr>
+      `).join('')
+      : '<tr><td colspan="5">История пока пуста.</td></tr>'
 
     const reportHtml = `<!doctype html>
 <html lang="ru">
@@ -2876,6 +2888,10 @@ export default function DispatcherPage({
     .risk-value { font-size: 18px; font-weight: 700; }
     .factors { margin: 8px 0 0 18px; padding: 0; }
     .factors li { margin-bottom: 4px; }
+    .history-table th {
+      width: auto;
+      text-align: left;
+    }
     .signatures {
       margin-top: 26px;
       display: grid;
@@ -2960,6 +2976,24 @@ export default function DispatcherPage({
         <tr><th>Время решения</th><td>${escapeHtml(formatDateTime(flight?.dispatcherDecisionAt))}</td></tr>
         <tr><th>Задержка</th><td>${escapeHtml(flight?.dispatcherDecisionDelayMinutes ? `${flight.dispatcherDecisionDelayMinutes} мин` : 'нет')}</td></tr>
         <tr><th>Обоснование</th><td>${escapeHtml(flight?.dispatcherDecisionReason || 'не указано')}</td></tr>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>5. История рейса</h2>
+      <table class="history-table">
+        <thead>
+          <tr>
+            <th>Дата и время</th>
+            <th>Событие</th>
+            <th>Старый риск</th>
+            <th>Новый риск</th>
+            <th>Решение</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${historyRows}
+        </tbody>
       </table>
     </section>
 
@@ -3391,9 +3425,16 @@ export default function DispatcherPage({
                 radius="xl"
                 variant="light"
                 onClick={() => {
-                  switchDispatcherTab('flights')
                   const flight = allFlights.find((item) => item.flightNumber === meteorologistUpdateNotice.flightNumber)
+                  if (flight?.aircraftType) {
+                    setTransportMode(flight.aircraftType)
+                  }
+                  setFlightFilters(DEFAULT_FLIGHT_FILTERS)
+                  setFlightAirportFilterInput('')
+                  switchDispatcherTab('flights')
                   if (flight?.id) {
+                    setActiveFlight(flight)
+                    setSelectedWeatherAirportId(flight.fromAirportId)
                     setHighlightedFlightId(flight.id)
                   }
                   setMeteorologistUpdateNotice(null)
@@ -4188,7 +4229,7 @@ export default function DispatcherPage({
                       const estimatedArrivalAt = getFlightArrivalForTable(flight)
                       const completed = isFlightCompleted(flight, estimatedArrivalAt, timeTick)
                       const inProgress = isFlightInProgress(flight, estimatedArrivalAt, timeTick)
-                      const riskScore = withDisplayRiskFloor(flight.totalRisk)
+                      const riskScore = asNumberOrNull(flight.totalRisk)
                       const riskUpdatedAt =
                         flight?.riskUpdatedAt ?? flight?.cachedRiskUpdatedAt ?? flight?.createdAt ?? null
                       const actionState = flightActionById[flight.id] ?? {}
