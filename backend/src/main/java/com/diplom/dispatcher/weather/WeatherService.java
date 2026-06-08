@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
@@ -21,6 +23,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class WeatherService {
+    private static final Logger log = LoggerFactory.getLogger(WeatherService.class);
+
     private final AirportCatalogService airportCatalogService;
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
@@ -62,6 +66,8 @@ public class WeatherService {
         try {
             fresh = fetchWeather(airport);
         } catch (Exception exception) {
+            log.warn("Weather fetch failed for airport {} (lat={}, lon={}), using synthetic fallback. Cause: {}",
+                    airportId, airport.lat(), airport.lon(), exception.toString(), exception);
             fresh = buildSyntheticWeather(airport, exception);
         }
 
