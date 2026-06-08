@@ -46,7 +46,7 @@ public class WeatherService {
         this.objectMapper = objectMapper;
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
         requestFactory.setConnectTimeout(5000);
-        requestFactory.setReadTimeout(7000);
+        requestFactory.setReadTimeout(15000);
         this.restTemplate = new RestTemplate(requestFactory);
         this.weatherBaseUrl = weatherBaseUrl;
         this.weatherApiKey = weatherApiKey;
@@ -93,16 +93,23 @@ public class WeatherService {
                 .build(true)
                 .toUri();
 
-        ResponseEntity<String> response = restTemplate.getForEntity(uri, String.class);
-        if (!response.getStatusCode().is2xxSuccessful() || response.getBody() == null) {
-            throw new IllegalStateException("Weather API error: HTTP " + response.getStatusCode().value());
+        RuntimeException lastError = null;
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            try {
+                ResponseEntity<String> response = restTemplate.getForEntity(uri, String.class);
+                if (!response.getStatusCode().is2xxSuccessful() || response.getBody() == null) {
+                    throw new IllegalStateException("Weather API error: HTTP " + response.getStatusCode().value());
+                }
+                return objectMapper.readTree(response.getBody());
+            } catch (Exception exception) {
+                lastError = new IllegalStateException(
+                        "OpenWeather request failed (attempt " + attempt + "): " + exception.getMessage(), exception);
+                if (attempt == 1) {
+                    log.debug("OpenWeather attempt {} failed, retrying. Cause: {}", attempt, exception.toString());
+                }
+            }
         }
-
-        try {
-            return objectMapper.readTree(response.getBody());
-        } catch (Exception exception) {
-            throw new IllegalStateException("Cannot parse weather API response", exception);
-        }
+        throw lastError;
     }
 
     private double safeNumber(JsonNode value, double fallback) {
