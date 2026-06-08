@@ -4,6 +4,7 @@ const listeners = new Set()
 let socket = null
 let reconnectTimer = null
 let reconnectAttempt = 0
+let reconnectPausedUntil = 0
 
 function notify(event) {
   listeners.forEach((listener) => {
@@ -17,7 +18,10 @@ function notify(event) {
 
 function scheduleReconnect() {
   if (reconnectTimer) return
-  const delay = Math.min(10000, 1000 + reconnectAttempt * 1000)
+  const now = Date.now()
+  const baseDelay = Math.min(60000, 1000 * (2 ** Math.min(reconnectAttempt, 6)))
+  const jitter = Math.round(Math.random() * 600)
+  const delay = Math.max(reconnectPausedUntil - now, baseDelay + jitter)
   reconnectAttempt += 1
   reconnectTimer = window.setTimeout(() => {
     reconnectTimer = null
@@ -39,6 +43,7 @@ export function connectAppUpdatesSocket() {
 
   socket.addEventListener('open', () => {
     reconnectAttempt = 0
+    reconnectPausedUntil = 0
   })
 
   socket.addEventListener('message', (message) => {
@@ -49,7 +54,12 @@ export function connectAppUpdatesSocket() {
     }
   })
 
-  socket.addEventListener('close', scheduleReconnect)
+  socket.addEventListener('close', (event) => {
+    if (event.code === 1008 || event.code === 1011) {
+      reconnectPausedUntil = Date.now() + 60000
+    }
+    scheduleReconnect()
+  })
   socket.addEventListener('error', () => {
     socket?.close()
   })
