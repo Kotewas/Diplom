@@ -37,6 +37,17 @@ services:
     ports:
       - "${BACKEND_PORT:-8080}:8080"
 
+  adminer:
+    image: adminer:4
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+      ADMINER_DESIGN: pepa-linha-dark
+    # Без внешнего порта: доступ только через nginx фронтенда по пути /db
+
   frontend:
     build:
       context: ./frontend
@@ -44,6 +55,7 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+      - adminer
     ports:
       - "${FRONTEND_PORT:-5173}:80"
 
