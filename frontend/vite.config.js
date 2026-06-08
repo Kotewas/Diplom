@@ -15,6 +15,11 @@ export default defineConfig(({ mode }) => {
           target: devApiTarget,
           changeOrigin: true,
         },
+        '/ws': {
+          target: devApiTarget,
+          changeOrigin: true,
+          ws: true,
+        },
       },
     },
   }
