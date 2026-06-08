@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Button, Group, Paper, SegmentedControl, Stack, Title } from '@mantine/core'
+import { Button, Group, Image, Paper, SegmentedControl, Stack, Text, Title } from '@mantine/core'
 import DispatcherPage from './features/dispatcher/ui/DispatcherPage'
 import MeteorologistPage from './features/dispatcher/ui/MeteorologistPage'
 import MeteorologistRequestPage from './features/dispatcher/ui/MeteorologistRequestPage'
@@ -107,7 +107,14 @@ function AuthScreen({ onAuthenticated }) {
   return (
     <Paper withBorder radius="xl" p="xl" className="surface-card" maw={560} mx="auto">
       <Stack gap="md">
-        <Title order={2}>Быстрый вход</Title>
+        <Group gap="sm" align="center" wrap="nowrap">
+          <Image src="/favicon.svg" alt="АэроРиск" w={44} h={44} radius="md" />
+          <Stack gap={0}>
+            <Title order={2} style={{ letterSpacing: '-0.02em' }}>АэроРиск</Title>
+            <Text size="sm" c="dimmed">Оценка погодных рисков рейсов</Text>
+          </Stack>
+        </Group>
+        <Title order={4} c="dimmed" fw={500}>Быстрый вход</Title>
         <SegmentedControl
           value={role}
           onChange={setRole}
