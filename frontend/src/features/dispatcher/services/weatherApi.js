@@ -55,7 +55,7 @@ function buildSyntheticWeather(airport, sourceError) {
     visibility,
     ...(rain > 0 ? { rain: { '1h': rain } } : {}),
     provider: 'synthetic-browser-fallback',
-    fallbackReason: sourceError?.message || 'weather fallback',
+    fallbackReason: 'Погодный backend временно недоступен, используется резервная модель',
   }
 }
 

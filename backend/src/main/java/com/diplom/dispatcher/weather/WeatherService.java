@@ -41,8 +41,8 @@ public class WeatherService {
         this.airportCatalogService = airportCatalogService;
         this.objectMapper = objectMapper;
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-        requestFactory.setConnectTimeout(2500);
-        requestFactory.setReadTimeout(3000);
+        requestFactory.setConnectTimeout(5000);
+        requestFactory.setReadTimeout(7000);
         this.restTemplate = new RestTemplate(requestFactory);
         this.weatherBaseUrl = weatherBaseUrl;
         this.weatherApiKey = weatherApiKey;
@@ -175,9 +175,17 @@ public class WeatherService {
 
         normalized.put("visibility", 10000);
         normalized.put("provider", "synthetic-fallback");
-        normalized.put("fallbackReason", sourceError == null ? "unknown" : sourceError.getMessage());
+        normalized.put("fallbackReason", describeFallbackReason(sourceError));
 
         return normalized;
+    }
+
+    private String describeFallbackReason(Exception sourceError) {
+        if (sourceError instanceof IllegalStateException && sourceError.getMessage() != null
+                && sourceError.getMessage().contains("API key")) {
+            return "Погодный API не настроен, используется резервная модель";
+        }
+        return "Погодный API временно недоступен, используется резервная модель";
     }
 
     private record CachedWeather(JsonNode data, Instant fetchedAt) {
